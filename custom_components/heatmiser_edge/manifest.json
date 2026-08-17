@@ -1,0 +1,13 @@
+{
+  "domain": "heatmiser_edge",
+  "name": "Heatmiser EDGE (Modbus)",
+  "codeowners": ["@dklemm"],
+  "after_dependencies": ["frontend", "http"],
+  "config_flow": true,
+  "documentation": "https://github.com/dklemm/home-assistant-heatmiser-edge",
+  "integration_type": "hub",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/dklemm/home-assistant-heatmiser-edge/issues",
+  "requirements": ["pymodbus>=3.13,<4", "pyserial>=3.5"],
+  "version": "0.1.0"
+}

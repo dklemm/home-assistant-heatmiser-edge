@@ -1,0 +1,78 @@
+set_time:
+  target:
+    device:
+      integration: heatmiser_edge
+  fields:
+    datetime:
+      example: "2026-08-12 14:30:00"
+      selector:
+        datetime:
+    dst:
+      selector:
+        boolean:
+
+set_hold:
+  target:
+    device:
+      integration: heatmiser_edge
+  fields:
+    duration:
+      required: true
+      example: "02:30:00"
+      selector:
+        duration:
+          enable_day: false
+    temperature:
+      selector:
+        number:
+          min: 5
+          max: 95
+          step: 0.5
+          unit_of_measurement: "°"
+          mode: box
+
+get_schedule:
+  target:
+    device:
+      integration: heatmiser_edge
+
+set_schedule:
+  target:
+    device:
+      integration: heatmiser_edge
+  fields:
+    days:
+      required: true
+      example: "[weekdays]"
+      selector:
+        select:
+          multiple: true
+          custom_value: false
+          options:
+            - label: "Every day"
+              value: "all"
+            - label: "Weekdays"
+              value: "weekdays"
+            - label: "Weekend"
+              value: "weekend"
+            - label: "Monday"
+              value: "monday"
+            - label: "Tuesday"
+              value: "tuesday"
+            - label: "Wednesday"
+              value: "wednesday"
+            - label: "Thursday"
+              value: "thursday"
+            - label: "Friday"
+              value: "friday"
+            - label: "Saturday"
+              value: "saturday"
+            - label: "Sunday"
+              value: "sunday"
+    periods:
+      required: true
+      example: |
+        - {period: 1, time: "07:00", temperature: 21}
+        - {period: 2, time: "09:00", temperature: 16}
+      selector:
+        object:

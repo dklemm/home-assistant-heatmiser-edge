@@ -1,0 +1,130 @@
+# Home Assistant with the heatmiser_edge integration mounted live, against both
+# a fake bus and the real thermostats.
+#
+#   docker compose up -d                  # HA + the fake bus
+#   docker compose --profile onebased up -d   # ...and a 1-based fake, to test detection
+#
+# Then http://localhost:8123 -> Settings -> Devices -> Add Integration -> Heatmiser EDGE.
+#
+# The integration is bind-mounted, so editing a file and restarting Home
+# Assistant (`docker compose restart homeassistant`) picks the change up. No
+# rebuild, no reinstall.
+#
+# ---------------------------------------------------------------------------
+# Which transport to choose in the config flow
+# ---------------------------------------------------------------------------
+#
+#   fake bus      TCP   host fake-edge        port 5020  framer "Modbus TCP"
+#   fake, 1-based TCP   host fake-edge-1based port 5021  framer "Modbus TCP"
+#   real stats    TCP   host host.docker.internal port 5022  framer "RTU over TCP"
+#
+# The fake server speaks real Modbus TCP (it is a pymodbus TCP server), so it
+# wants the *socket* framer. The real bus arrives over dev/serial_tcp_bridge.py,
+# which is a transparent byte pipe, so it wants the *RTU* framer - the same
+# choice a cheap RS485-to-Ethernet gateway forces, which is why that setting
+# exists at all.
+#
+# ---------------------------------------------------------------------------
+# The real thermostats, on macOS
+# ---------------------------------------------------------------------------
+#
+# Docker Desktop runs containers inside a Linux VM with no view of the host's USB
+# tree, so a `devices:` mapping gives the container nothing. The bridge below is
+# how the real bus gets in - run it on the host and leave it running:
+#
+#   .venv/bin/python dev/serial_tcp_bridge.py \
+#       --port /dev/cu.usbserial-0001 --listen 5022
+#
+# 5022 is the port this was tested on, and `extra_hosts` below is what makes it
+# reachable: the bridge binds 0.0.0.0 on the host, and the container dials
+# host.docker.internal:5022. Verified end to end from inside the HA container
+# against the real thermostat (unit 1, firmware 48).
+#
+# Confirmed working settings for the real bus: 9600 8N1, unit id 1, register
+# base 0-based - which detection works out on its own, so leave it on "Detect
+# automatically".
+#
+# ---------------------------------------------------------------------------
+# The real thermostats, on Linux
+# ---------------------------------------------------------------------------
+#
+# No bridge needed. Uncomment the `devices:` block on the homeassistant service
+# below, then choose the *serial* transport in the config flow with the port set
+# to /dev/ttyUSB0. Serial is the more faithful test: it exercises the same code
+# path a real install uses.
+
+services:
+  homeassistant:
+    image: ghcr.io/home-assistant/home-assistant:stable
+    container_name: heatmiser-edge-ha
+    restart: unless-stopped
+    ports:
+      - "8123:8123"
+    environment:
+      TZ: Europe/London
+      # Keeps root-owned __pycache__ directories out of the mounted source.
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - ./dev/ha-config:/config
+      # The integration itself, read-only: Home Assistant never writes here, and
+      # ro keeps the container from leaving root-owned files in the working tree.
+      - ./custom_components/heatmiser_edge:/config/custom_components/heatmiser_edge:ro
+    # Lets the container reach the host-side serial bridge as
+    # host.docker.internal on Linux too, where that name is not built in.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # --- Linux only: pass the RS485 adapter straight through and use the
+    # --- serial transport instead of the bridge.
+    # devices:
+    #   - /dev/ttyUSB0:/dev/ttyUSB0
+
+  # Three thermostats on one port - 1 = Heat, 2 = Timer, 3 = Heat. The multi-unit
+  # behaviour is the point: per-thermostat availability, the shared bus lock, and
+  # telling a Heat from a Timer cannot be exercised against a single stat.
+  fake-edge:
+    # The Home Assistant image, reused deliberately. It already carries both
+    # pymodbus and homeassistant, and the fake server needs both: importing
+    # custom_components.heatmiser_edge.const runs the package __init__, which
+    # imports homeassistant even though const.py itself is pure. A slim Python
+    # image needs a full Home Assistant install to get here.
+    image: ghcr.io/home-assistant/home-assistant:stable
+    container_name: heatmiser-edge-fake
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - ./:/app:ro
+    # pymodbus 3.14 specifically: the image ships 3.13.1, whose SimData packs
+    # registers as *signed* shorts and dies on the RTC block's 0xFFFF seed. The
+    # integration itself is happy on 3.13 (manifest allows >=3.13,<4) - this pin
+    # is the simulator's requirement, not the component's.
+    #
+    # --host 0.0.0.0 matters too: the script defaults to 127.0.0.1, which inside
+    # a container would refuse every connection from outside it.
+    # One list with the script as a single element. A string `command:` is
+    # word-split by Compose, which would hand `sh -c` only the first word.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - pip install --quiet --no-cache-dir 'pymodbus>=3.14,<4' &&
+        exec python dev/fake_edge_server.py --host 0.0.0.0 --port 5020
+    ports:
+      - "5020:5020"
+
+  # The other wire convention. Detection is supposed to work this out on its own,
+  # and this is what proves it does - point a second config entry at this one and
+  # the register base should come back 1-based without being told.
+  fake-edge-1based:
+    image: ghcr.io/home-assistant/home-assistant:stable
+    container_name: heatmiser-edge-fake-1based
+    profiles: ["onebased"]
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - ./:/app:ro
+    entrypoint:
+      - /bin/sh
+      - -c
+      - pip install --quiet --no-cache-dir 'pymodbus>=3.14,<4' &&
+        exec python dev/fake_edge_server.py --host 0.0.0.0 --port 5021 --offset 0
+    ports:
+      - "5021:5021"

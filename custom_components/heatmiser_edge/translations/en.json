@@ -1,0 +1,228 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "How is the RS485 bus connected?",
+        "menu_options": {
+          "serial": "USB RS485 adapter",
+          "tcp": "RS485-to-Ethernet gateway"
+        }
+      },
+      "serial": {
+        "title": "USB RS485 adapter",
+        "description": "The EDGE manual specifies 9600 baud with no parity. It says nothing about data or stop bits, so 8N1 is assumed — change them only if that does not work.",
+        "data": {
+          "serial_port": "Serial port",
+          "baudrate": "Baud rate",
+          "bytesize": "Data bits",
+          "parity": "Parity",
+          "stopbits": "Stop bits",
+          "unit_ids": "Communications IDs (Modbus) to look for",
+          "register_offset": "Register addressing"
+        },
+        "data_description": {
+          "serial_port": "For example /dev/ttyUSB0, or a stable path under /dev/serial/by-id/.",
+          "unit_ids": "A list or range, such as 1-32 or 1-4,7. Each thermostat's ID is set on its own keypad, under feature 11 — Communications ID (Modbus). The factory default is 00, which disables Modbus entirely, so every thermostat needs an ID of its own between 01 and 32: two sharing one ID will clash on the bus. The default sweeps the whole range, which is thorough but slow — every ID with nothing on it costs half a second, so around 18 seconds in all. Narrow it if you know the IDs.",
+          "register_offset": "The manual numbers registers from 1 but never says whether the wire agrees. Leave this on automatic: it is worked out by checking which addressing makes a thermostat report its own ID back."
+        }
+      },
+      "tcp": {
+        "title": "RS485-to-Ethernet gateway",
+        "description": "Configure the gateway's serial side for 9600 baud, no parity, 8 data bits, 1 stop bit.",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "framer": "Protocol",
+          "unit_ids": "Communications IDs (Modbus) to look for",
+          "register_offset": "Register addressing"
+        },
+        "data_description": {
+          "framer": "Cheap gateways are split between real Modbus TCP and transparent RTU-over-TCP. Choosing wrong looks exactly like a dead bus, so try the other one if nothing is found.",
+          "unit_ids": "A list or range, such as 1-32 or 1-4,7. Each thermostat's ID is set on its own keypad, under feature 11 — Communications ID (Modbus). The factory default is 00, which disables Modbus entirely, so every thermostat needs an ID of its own between 01 and 32: two sharing one ID will clash on the bus. The default sweeps the whole range, which is thorough but slow — every ID with nothing on it costs half a second, so around 18 seconds in all. Narrow it if you know the IDs.",
+          "register_offset": "The manual numbers registers from 1 but never says whether the wire agrees. Leave this on automatic: it is worked out by checking which addressing makes a thermostat report its own ID back."
+        }
+      },
+      "reconfigure": {
+        "title": "Re-scan the bus",
+        "description": "Look for thermostats again, to pick up one that has been added or drop one that has been removed. The connection settings are left as they are.",
+        "data": {
+          "unit_ids": "Communications IDs (Modbus) to look for",
+          "register_offset": "Register addressing"
+        },
+        "data_description": {
+          "unit_ids": "A list or range, such as 1-32 or 1-4,7. A thermostat you have just added needs its own ID between 01 and 32, set on its keypad under feature 11 — Communications ID (Modbus). The factory default is 00, which disables Modbus entirely."
+        }
+      },
+      "confirm": {
+        "title": "Found {count} thermostat(s)",
+        "description": "Register addressing: {offset}.\n\nThe EDGE protocol has no model register, so the type of each thermostat is worked out from what its registers look like. Thermostats needing a second look: {unsure}.",
+        "data": {},
+        "data_description": {}
+      }
+    },
+    "progress": {
+      "scanning": "Scanning the RS485 bus for thermostats…"
+    },
+    "error": {
+      "cannot_connect": "Could not open the bus.",
+      "invalid_unit_ids": "Use Communications IDs between 1 and 32, as a list or range such as 1-32 or 1-4,7. ID 0 disables Modbus on a thermostat and 255 is the radio channel, so neither can be used."
+    },
+    "abort": {
+      "already_configured": "This bus is already set up.",
+      "cannot_connect": "Could not open the bus. Check the serial port or gateway address is right and nothing else is holding it open.",
+      "no_thermostats_found": "No thermostat answered. Check the A and B wires are not swapped, that the bus is terminated, and that each thermostat has its own Communications ID (Modbus) set on its keypad under feature 11 — the factory default of 00 disables Modbus. On a gateway, try the other protocol setting.",
+      "reconfigure_successful": "The bus was re-scanned."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Heatmiser EDGE options",
+        "data": {
+          "scan_interval": "Polling interval",
+          "timeout": "Response timeout",
+          "controls": "Allow changing settings",
+          "register_offset": "Register addressing"
+        },
+        "data_description": {
+          "scan_interval": "Every thermostat is read once per interval, which takes about a fifth of a second each at 9600 baud.",
+          "timeout": "How long to wait for a thermostat to answer before treating it as absent.",
+          "controls": "Turn this off to make the integration read-only. Every setting, mode and setpoint control disappears; readings are unaffected.",
+          "register_offset": "Change this only if every reading looks like it belongs to the neighbouring register."
+        }
+      }
+    }
+  },
+  "services": {
+    "set_time": {
+      "name": "Set time",
+      "description": "Sets the clock on a thermostat, which is what its weekly program runs against. The thermostat cannot be asked what time it thinks it is, so there is nothing to read back — run this on a schedule to keep a drifting clock right.",
+      "fields": {
+        "datetime": {
+          "name": "Date and time",
+          "description": "The time to set. Defaults to Home Assistant's own local time, which is what you want in almost every case."
+        },
+        "dst": {
+          "name": "Daylight saving",
+          "description": "Also turn the thermostat's own daylight saving on or off. Left alone if not set. With it off, the thermostat keeps exactly the time sent here, so re-syncing from Home Assistant handles the seasonal change instead."
+        }
+      }
+    },
+    "set_hold": {
+      "name": "Set hold",
+      "description": "Holds a thermostat at a temperature for a set time, then lets it return to normal operation. Hold cannot be selected as a preset on its own: the thermostat refuses the mode unless a duration has been stored first, which is why this is an action.",
+      "fields": {
+        "duration": {
+          "name": "Duration",
+          "description": "How long to hold for, up to 99 hours 59 minutes. The thermostat counts it down and then returns to normal operation."
+        },
+        "temperature": {
+          "name": "Temperature",
+          "description": "The temperature to hold at, in the thermostat's own units. Leave it empty to hold at the current target."
+        }
+      }
+    },
+    "get_schedule": {
+      "name": "Get schedule",
+      "description": "Reads the weekly program back from a thermostat. It is not polled — it is around 170 registers, which is several seconds of bus time on a busy wire — so this reads it fresh each time. The response also reports how many periods a day the thermostat runs and how many of its seven days are independent.",
+      "fields": {}
+    },
+    "set_schedule": {
+      "name": "Set schedule",
+      "description": "Writes periods into the weekly program. Only the periods you list are changed, and only on the days you name, so you can adjust one switching time without restating the week. The whole day is checked before anything is written: periods must run forwards through the day, with any unused ones at the end.",
+      "fields": {
+        "days": {
+          "name": "Days",
+          "description": "Which days to write. On a thermostat set to 5/2 day or 24 hour, the days are not independent, so naming one writes every day that shares its program — the thermostat then behaves as you asked whichever block it reads."
+        },
+        "periods": {
+          "name": "Periods",
+          "description": "A list of periods. On a Heat each one is a period number, a time and a temperature; on a Timer it is a period number, an on time and an off time. A time of \"off\" switches that period off, and leaving the temperature out keeps the one already stored."
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "unknown_device": {
+      "message": "No such device: {device_id}."
+    },
+    "not_a_thermostat": {
+      "message": "{name} is not a Heatmiser EDGE thermostat or bus."
+    },
+    "bad_datetime": {
+      "message": "{datetime} cannot be put on a thermostat's clock: the year must be between 2000 and 5000."
+    },
+    "read_only": {
+      "message": "{name} is set up read-only. Turn on \"Allow changing settings\" in the integration's options to change anything on it."
+    },
+    "no_thermostats_targeted": {
+      "message": "No Heatmiser EDGE thermostat was targeted. Pick a thermostat, or the bus itself to set every thermostat on it."
+    },
+    "set_time_failed": {
+      "message": "Could not set the time on {names} — the thermostat did not answer."
+    },
+    "bad_hold_duration": {
+      "message": "A hold of {duration} is not possible: it must be between one minute and 99 hours 59 minutes."
+    },
+    "bad_hold_temperature": {
+      "message": "{temperature} is outside what {name} accepts ({low} to {high})."
+    },
+    "set_hold_failed": {
+      "message": "Could not set the hold on {names} — the thermostat did not answer."
+    },
+    "hold_needs_a_duration": {
+      "message": "{name} will not enter Hold without a duration. Use the \"Set hold\" action, which sets the time and the mode together."
+    },
+    "mode_not_available": {
+      "message": "{name} will not accept {mode} while its program mode is \"None programmable\". Available: {available}."
+    },
+    "get_schedule_failed": {
+      "message": "Could not read the weekly program from {names} — the thermostat did not answer."
+    },
+    "set_schedule_failed": {
+      "message": "Could not set the weekly program on {names} — the thermostat did not answer."
+    },
+    "schedule_not_stored": {
+      "message": "{names} did not keep the weekly program it was sent. Reading it back gave different values, so check what the thermostat is showing."
+    },
+    "schedule_not_programmable": {
+      "message": "{name} has its program mode set to \"Non-programmable\", so it has no weekly program to write. Change the program mode first."
+    },
+    "no_schedule_days": {
+      "message": "No days were given. Name the days to write, or use \"all\", \"weekdays\" or \"weekend\"."
+    },
+    "bad_schedule_day": {
+      "message": "\"{day}\" is not a day. Use a day name, or \"all\", \"weekdays\" or \"weekend\"."
+    },
+    "bad_schedule_periods": {
+      "message": "The periods must be a list, each one giving at least a time."
+    },
+    "bad_schedule_period": {
+      "message": "\"{period}\" is not a period number."
+    },
+    "bad_schedule_period_number": {
+      "message": "{name} runs {available} periods a day, so there is no period {period}. Its number of periods is set on the thermostat, under Program Type."
+    },
+    "duplicate_schedule_period": {
+      "message": "Period {period} was given twice."
+    },
+    "bad_schedule_time": {
+      "message": "\"{time}\" is not a time for period {period}. Use HH:MM, or \"off\" to switch the period off."
+    },
+    "bad_schedule_temperature": {
+      "message": "{temperature} is outside what {name} accepts for period {period} ({low} to {high})."
+    },
+    "schedule_needs_a_temperature": {
+      "message": "Period {period} on {day} has no temperature stored on {name}, so switching it on needs one given here."
+    },
+    "schedule_out_of_order": {
+      "message": "Period {period} on {day} would start at {time}, which is not after the period before it. A day has to run forwards."
+    },
+    "schedule_gap": {
+      "message": "Period {period} on {day} would follow one that is switched off. A day's unused periods have to be the last ones."
+    },
+    "schedule_off_before_on": {
+      "message": "Period {period} on {day} would switch off before it switches on."
+    }
+  }
+}
