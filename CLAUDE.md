@@ -293,6 +293,15 @@ symptom Home Assistant can see.
   **bus device means every thermostat on it**. A device named outright must be ours and must be
   writable, or the call raises; one reached through an area, floor, label or entity is filtered
   silently — "set the time upstairs" skips the lamps.
+- **But the picker in `services.yaml` cannot say so, and every `target:` there is bare.** hassfest
+  refuses *any* `device` key under `target` — `raise_on_target_device_filter` in
+  `script/hassfest/services.py` tests `if "device" in value`, so nesting it under `filter:` does not
+  help. Neither way round it is usable: an `entity` filter passes hassfest but hides the bus device,
+  which has no entities of its own, and the `device` selector under `fields:` that hassfest's own
+  message recommends would give up area, floor, label and entity targeting. So the picker offers
+  everything and `_async_targets` does the filtering, which it always did — the filter was only ever
+  a UI hint. Do not "fix" the empty `target:` blocks. Gated by
+  `tests/test_packaging.py::test_no_action_filters_its_target_by_device`.
 - **`CONF_CONTROLS` gates it** like everything else. Read-only means read-only, action or not.
 - **A silent thermostat does not deny the others their clock.** Failures are collected and raised
   together after every reachable stat has been set — the poll's rule, applied to a write.
@@ -409,6 +418,9 @@ symptom on 2026-08-12 was this and nothing else.
 
 Tests must not open sockets — `pytest-homeassistant-custom-component` fails the teardown if they do.
 Any test that creates a config entry needs the `mock_hub` fixture.
+
+**hassfest sorts the manifest**: `domain`, `name`, then strictly alphabetical. Adding a key in the
+place that reads best fails CI.
 
 Release: bump `manifest.json` → tag `vX.Y.Z` → GitHub release. CI is hassfest, HACS (`ignore: brands`
 permanently) and pytest on 3.14. No ruff, no mypy.

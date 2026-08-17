@@ -115,6 +115,24 @@ def test_every_action_and_field_has_strings():
             assert described["name"] and described["description"]
 
 
+def test_no_action_filters_its_target_by_device():
+    """hassfest refuses any `device` key under an action's `target`.
+
+    `raise_on_target_device_filter` in `script/hassfest/services.py` tests
+    `if "device" in value`, so nesting it under `filter:` does not help either.
+    The obvious `device: integration: heatmiser_edge` is what anyone adding a
+    fifth action writes first, and without this it costs a full CI round trip
+    to find out. See the `set_time` section of CLAUDE.md for why neither way
+    round it is usable.
+    """
+    services = yaml.safe_load((COMPONENT / "services.yaml").read_text())
+    for name, service in services.items():
+        assert "target" in service, f"{name} is targeted and needs a target block"
+        assert "device" not in (service["target"] or {}), (
+            f"{name}: hassfest refuses a device filter on target"
+        )
+
+
 def test_every_raised_translation_key_has_a_message():
     """A `translation_key` with no string surfaces as the bare key in a toast.
 

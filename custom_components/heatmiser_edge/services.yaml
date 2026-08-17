@@ -1,9 +1,11 @@
-# The target picker is deliberately unfiltered. hassfest rejects any `device`
-# key under `target`, and an `entity` filter is not a substitute: the bus device
-# carries no entities of its own, so filtering would hide the one target that
-# means "every thermostat on the wire". Nothing is lost by leaving it open --
-# `_async_targets` already raises on a device named outright that is not ours,
-# and silently skips anything reached through an area, floor, label or entity.
+# Every `target:` below is deliberately unfiltered, and must stay that way.
+# hassfest refuses any `device` key under `target`, and neither way round it is
+# usable here: an `entity` filter would hide the bus device, which carries no
+# entities of its own and is the target meaning "every thermostat on the wire",
+# and the `device` selector under `fields:` that hassfest's message recommends
+# would give up the area, floor, label and entity targeting instead. Which
+# targets are ours is decided in `_async_targets`, not here.
+
 set_time:
   target:
   fields:
