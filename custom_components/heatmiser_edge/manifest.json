@@ -1,8 +1,8 @@
 {
   "domain": "heatmiser_edge",
   "name": "Heatmiser EDGE (Modbus)",
-  "codeowners": ["@dklemm"],
   "after_dependencies": ["frontend", "http"],
+  "codeowners": ["@dklemm"],
   "config_flow": true,
   "documentation": "https://github.com/dklemm/home-assistant-heatmiser-edge",
   "integration_type": "hub",
