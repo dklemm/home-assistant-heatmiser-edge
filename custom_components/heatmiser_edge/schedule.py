@@ -40,8 +40,8 @@ from datetime import time as dt_time
 
 from .const import (
     MODEL_HEAT,
-    PROGRAM_MODE_24_HOUR,
     PROGRAM_MODE_5_2,
+    PROGRAM_MODE_24_HOUR,
     SETPOINT_MAX_C,
     SETPOINT_MAX_F,
     SETPOINT_MIN_C,
