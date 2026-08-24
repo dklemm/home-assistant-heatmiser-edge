@@ -68,7 +68,20 @@ MAX_TIMEOUT = 10.0
 # each keeps a full 1-32 sweep near 18 s instead of a minute.
 SCAN_TIMEOUT = 0.5
 
+# How often the scan's progress dialog re-renders. Deliberately a clock and not
+# "once per unit id": a stat that answers takes ~150 ms and an absent one pays a
+# full SCAN_TIMEOUT, so per-unit updates arrive at wildly uneven intervals and
+# the dialog visibly stutters.
+SCAN_PROGRESS_INTERVAL = 1.0
+
 INTER_TRANSACTION_GAP = 0.05  # manual: "read and write data interval greater than 50 ms"
+
+# Manual register N at wire N-1: the standard Modbus convention. The manual never
+# says, so this was settled on hardware and confirmed across 1-218 (see CLAUDE.md).
+# A setting rather than a constant only so a stat that disagreed could be fixed
+# without a release; `EdgeHub._check_register_base` warns when one does.
+DEFAULT_REGISTER_OFFSET = -1
+REGISTER_OFFSETS = (-1, 0)
 
 # When to ask the thermostat again after a write, until it has actually acted.
 # Seconds after the write, not gaps between probes.

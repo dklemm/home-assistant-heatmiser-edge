@@ -1,3 +1,7 @@
 pytest-homeassistant-custom-component
-pymodbus>=3.13,<4
+modbus-connection[pymodbus]>=4.8.1,<5
 pyserial>=3.5
+# The integration no longer imports pymodbus directly, but dev/fake_edge_server.py
+# does: modbus-connection has no server side. 3.14+ because 3.13.1's SimData packs
+# registers as signed shorts and dies on the 0xFFFF RTC seed.
+pymodbus>=3.14,<4

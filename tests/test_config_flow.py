@@ -28,6 +28,8 @@ from custom_components.heatmiser_edge.const import (
     CONF_UNIT_ID,
     CONF_UNIT_IDS,
     CONF_UNITS,
+    DEFAULT_REGISTER_OFFSET,
+    MAX_UNIT_ID,
     DOMAIN,
     FRAMER_SOCKET,
     MODEL_HEAT,
@@ -35,16 +37,15 @@ from custom_components.heatmiser_edge.const import (
     TRANSPORT_SERIAL,
     TRANSPORT_TCP,
 )
-from custom_components.heatmiser_edge.hub import EdgeConnectionError
+from custom_components.heatmiser_edge import config_flow
+from custom_components.heatmiser_edge.hub import EdgeConnectionError, EdgeHub
 
-SCAN_TARGET = "custom_components.heatmiser_edge.config_flow.async_scan_bus"
 
 TCP_INPUT = {
     CONF_HOST: "10.0.0.5",
     CONF_PORT: 502,
     CONF_FRAMER: FRAMER_SOCKET,
     CONF_UNIT_IDS: "1-4",
-    CONF_REGISTER_OFFSET: "auto",
 }
 SERIAL_INPUT = {
     CONF_SERIAL_PORT: "/dev/ttyUSB0",
@@ -53,7 +54,6 @@ SERIAL_INPUT = {
     CONF_PARITY: "N",
     CONF_STOPBITS: 1,
     CONF_UNIT_IDS: "1-4",
-    CONF_REGISTER_OFFSET: "auto",
 }
 
 
@@ -73,16 +73,55 @@ def discovered(words_builder, *specs):
     return found
 
 
-async def run_scan(hass, result, found, offset=-1):
-    """Drive the progress step to completion and land on `confirm`."""
+def patch_bus(found, *, probed=None, connect_error=None):
+    """A bus holding exactly `found`, patched at the hub.
 
-    async def fake_scan(data, unit_ids):
-        return offset, found
+    The flow sweeps one id per progress step now, so there is no single scan
+    function left to stub - which means these tests drive the real sweep.
+    """
+    bus = {f.unit_id: f.words for f in found}
 
-    with patch(SCAN_TARGET, fake_scan):
-        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    async def fake_connect(self):
+        if connect_error is not None:
+            raise connect_error
+
+    async def fake_close(self):
+        return None
+
+    async def fake_probe(self, unit_id):
+        if probed is not None:
+            probed.append(unit_id)
+        words = bus.get(unit_id)
+        return None if words is None else {n: words[n] for n in range(30, 35)}
+
+    async def fake_read_block(self, unit_id, start, count):
+        words = bus.get(unit_id)
+        if words is None:
+            return None
+        return {n: words.get(n, 0) for n in range(start, start + count)}
+
+    return (
+        patch.object(EdgeHub, "async_connect", fake_connect),
+        patch.object(EdgeHub, "async_close", fake_close),
+        patch.object(EdgeHub, "async_probe_unit", fake_probe),
+        patch.object(EdgeHub, "async_read_block", fake_read_block),
+    )
+
+
+async def drive_scan(hass, result):
+    """Step the progress dialog until the sweep is done."""
+    while result["type"] is FlowResultType.SHOW_PROGRESS:
         await hass.async_block_till_done()
-        return await hass.config_entries.flow.async_configure(result["flow_id"])
+        result = await hass.config_entries.flow.async_configure(result["flow_id"])
+    return result
+
+
+async def run_scan(hass, result, found, **kwargs):
+    """Drive the whole sweep and land on `confirm`."""
+    patches = patch_bus(found, **kwargs)
+    with patches[0], patches[1], patches[2], patches[3]:
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+        return await drive_scan(hass, result)
 
 
 async def start(hass, transport, user_input):
@@ -114,8 +153,8 @@ async def test_tcp_flow_creates_an_entry(hass, words, mock_hub):
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"][CONF_TRANSPORT] == TRANSPORT_TCP
-    # The scan's verdict is stored, so a restart does not re-probe the bus.
-    assert result["data"][CONF_REGISTER_OFFSET] == -1
+    # Setup never asks for the register base; it is an option with a default.
+    assert CONF_REGISTER_OFFSET not in result["data"]
     assert result["data"][CONF_UNITS] == [
         {CONF_UNIT_ID: 1, CONF_MODEL: MODEL_HEAT, "name": "Hall"},
         {CONF_UNIT_ID: 2, CONF_MODEL: MODEL_TIMER, "name": "HW"},
@@ -168,17 +207,19 @@ async def test_no_thermostats_aborts_with_something_actionable(hass):
 
 
 async def test_a_bus_that_will_not_open_aborts(hass):
+    """A dead bus stops the sweep at the first id, not after all 32 timeouts."""
     result = await start(hass, TRANSPORT_TCP, TCP_INPUT)
-
-    async def failing_scan(data, unit_ids):
-        raise EdgeConnectionError("no such port")
-
-    with patch(SCAN_TARGET, failing_scan):
-        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
-        await hass.async_block_till_done()
-        result = await hass.config_entries.flow.async_configure(result["flow_id"])
+    probed: list[int] = []
+    result = await run_scan(
+        hass,
+        result,
+        [],
+        probed=probed,
+        connect_error=EdgeConnectionError("no such port"),
+    )
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "cannot_connect"
+    assert probed == []
 
 
 async def test_the_same_bus_cannot_be_added_twice(hass):
@@ -198,24 +239,94 @@ async def test_impossible_unit_ids_are_rejected(hass, bad):
     assert result["errors"] == {CONF_UNIT_IDS: "invalid_unit_ids"}
 
 
+async def test_the_progress_dialog_names_the_unit_and_the_running_total(hass, words):
+    """18 seconds of "scanning" says nothing; this says where it has got to.
+
+    Recorded off `async_show_progress` itself, because that is exactly what the
+    frontend is handed each time a unit's probe finishes and the flow re-enters
+    the step.
+    """
+    found = discovered(words, (2, MODEL_HEAT))
+    result = await start(hass, TRANSPORT_TCP, {**TCP_INPUT, CONF_UNIT_IDS: "1-4"})
+
+    seen = []
+    real = config_flow.EdgeConfigFlow.async_show_progress
+
+    def spy(self, **kwargs):
+        seen.append(kwargs["description_placeholders"])
+        return real(self, **kwargs)
+
+    patches = patch_bus(found)
+    # Zero the interval so every id is its own batch, and every id therefore its
+    # own render - the mock answers instantly, so a real interval would sweep the
+    # whole bus inside one task and there would be nothing to observe.
+    with patches[0], patches[1], patches[2], patches[3], patch.object(
+        config_flow, "SCAN_PROGRESS_INTERVAL", 0
+    ), patch.object(config_flow.EdgeConfigFlow, "async_show_progress", spy):
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+        result = await drive_scan(hass, result)
+
+    assert [p["unit"] for p in seen] == ["1", "2", "3", "4"]
+    assert [p["position"] for p in seen] == ["1", "2", "3", "4"]
+    assert all(p["total"] == "4" for p in seen)
+    # Unit 2 answers, so it is named from the step that follows its probe.
+    assert [p["found"] for p in seen] == ["none yet", "none yet", "2", "2"]
+    assert result["step_id"] == "confirm"
+
+
+def test_the_found_list_cannot_grow_the_dialog():
+    """A line that wraps part way through a sweep shifts everything below it."""
+    from custom_components.heatmiser_edge.config_flow import (
+        _MAX_FOUND_SHOWN,
+        DiscoveredUnit,
+        _found_summary,
+    )
+
+    def summary(count):
+        return _found_summary([DiscoveredUnit(i, None, {}) for i in range(1, count + 1)])
+
+    assert summary(0) == "none yet"
+    assert summary(3) == "1, 2, 3"
+    assert summary(_MAX_FOUND_SHOWN + 4).endswith(" and 4 more")
+    # 32 stats is the most a bus can hold, and it still fits on one line.
+    assert len(summary(MAX_UNIT_ID)) < 60
+
+
+async def test_the_dialog_is_paced_by_a_clock_not_by_unit_ids(hass, words):
+    """Per-id re-renders made the spinner stutter, because ids are not evenly
+    timed: a stat that answers takes ~150 ms and an absent one pays a full
+    timeout. A batch is a second's worth of ids, however many that is.
+    """
+    renders = []
+    real = config_flow.EdgeConfigFlow.async_show_progress
+
+    def spy(self, **kwargs):
+        renders.append(kwargs["description_placeholders"]["position"])
+        return real(self, **kwargs)
+
+    result = await start(hass, TRANSPORT_TCP, {**TCP_INPUT, CONF_UNIT_IDS: "1-32"})
+    patches = patch_bus(discovered(words, (1, MODEL_HEAT)))
+    with patches[0], patches[1], patches[2], patches[3], patch.object(
+        config_flow.EdgeConfigFlow, "async_show_progress", spy
+    ):
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+        result = await drive_scan(hass, result)
+
+    # The mock answers instantly, so a whole 32-id sweep fits in one interval.
+    assert renders == ["1"]
+    assert result["step_id"] == "confirm"
+
+
 async def test_the_id_list_alone_decides_what_is_swept(hass, words):
     """There is one control, and asking for the whole range is typing it in.
 
     This replaced a "scan every ID" checkbox that sat next to the id list and
     silently overrode it.
     """
-    seen: dict = {}
-
-    async def fake_scan(data, unit_ids):
-        seen["ids"] = unit_ids
-        return -1, discovered(words, (1, MODEL_HEAT))
-
+    probed: list[int] = []
     result = await start(hass, TRANSPORT_TCP, {**TCP_INPUT, CONF_UNIT_IDS: "1-32"})
-    with patch(SCAN_TARGET, fake_scan):
-        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
-        await hass.async_block_till_done()
-        await hass.config_entries.flow.async_configure(result["flow_id"])
-    assert seen["ids"] == list(range(1, 33))
+    await run_scan(hass, result, discovered(words, (1, MODEL_HEAT)), probed=probed)
+    assert probed == list(range(1, 33))
 
 
 @pytest.mark.parametrize(
@@ -236,14 +347,17 @@ async def test_the_default_id_list_is_the_whole_range(hass, transport, required)
     assert result["data_schema"](required)[CONF_UNIT_IDS] == "1-32"
 
 
-async def test_an_explicit_offset_is_honoured(hass, words):
-    """If a user knows their firmware, detection should not second-guess them."""
+async def test_the_register_base_defaults_to_the_standard_convention(hass):
+    """-1 unless a user says otherwise; there is no search to second-guess them."""
     from custom_components.heatmiser_edge.config_flow import build_scan_hub
 
-    hub = build_scan_hub({**TCP_INPUT, CONF_TRANSPORT: TRANSPORT_TCP, CONF_REGISTER_OFFSET: "0"})
-    assert hub.register_offset == 0
     hub = build_scan_hub({**TCP_INPUT, CONF_TRANSPORT: TRANSPORT_TCP})
-    assert hub.register_offset is None
+    assert hub.register_offset == DEFAULT_REGISTER_OFFSET
+
+    hub = build_scan_hub(
+        {**TCP_INPUT, CONF_TRANSPORT: TRANSPORT_TCP, CONF_REGISTER_OFFSET: "0"}
+    )
+    assert hub.register_offset == 0
 
 
 # ----------------------------------------------------------------------
@@ -282,28 +396,43 @@ async def test_options_round_trip(hass, mock_hub):
     assert entry.runtime_data.units[0].name == "Hallway"
 
 
-async def test_options_can_return_the_offset_to_automatic(hass, mock_hub):
-    from tests.test_coordinator import setup_entry
+async def test_a_rescan_honours_an_offset_set_in_options(hass, mock_hub):
+    """The base is an option, so a re-scan must read it from there.
 
-    entry = await setup_entry(hass)
-    result = await hass.config_entries.options.async_init(entry.entry_id)
-    result = await hass.config_entries.options.async_configure(
-        result["flow_id"],
-        {
-            CONF_SCAN_INTERVAL: 60,
-            CONF_TIMEOUT: 1.0,
-            CONF_CONTROLS: True,
-            CONF_REGISTER_OFFSET: "auto",
-            "name_1": "Hall",
-            "model_1": MODEL_HEAT,
-            "name_2": "Hot water",
-            "model_2": MODEL_TIMER,
-            "name_3": "Study",
-            "model_3": MODEL_HEAT,
+    Setup does not ask for it, so it never reaches `entry.data` - and a re-scan
+    at the wrong base finds no thermostats and reads as an empty bus.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="tcp:10.0.0.5:502",
+        data={
+            CONF_TRANSPORT: TRANSPORT_TCP,
+            CONF_HOST: "10.0.0.5",
+            CONF_PORT: 502,
+            CONF_UNIT_IDS: "1-4",
         },
+        options={CONF_REGISTER_OFFSET: 0},
     )
-    await hass.async_block_till_done()
-    assert entry.options[CONF_REGISTER_OFFSET] is None
+    entry.add_to_hass(hass)
+    seen = {}
+    real_build = config_flow.build_scan_hub
+
+    def spy(data):
+        hub = real_build(data)
+        seen["offset"] = hub.register_offset
+        return hub
+
+    result = await entry.start_reconfigure_flow(hass)
+    patches = patch_bus([])
+    with patches[0], patches[1], patches[2], patches[3], patch.object(
+        config_flow, "build_scan_hub", spy
+    ):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_UNIT_IDS: "1-4"}
+        )
+        await drive_scan(hass, result)
+
+    assert seen["offset"] == 0
 
 
 async def test_reconfigure_rescans_and_keeps_existing_names(hass, mock_hub, words):
@@ -316,7 +445,7 @@ async def test_reconfigure_rescans_and_keeps_existing_names(hass, mock_hub, word
 
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"],
-        {CONF_UNIT_IDS: "1-4", CONF_REGISTER_OFFSET: "auto"},
+        {CONF_UNIT_IDS: "1-4"},
     )
     found = discovered(words, (1, MODEL_HEAT), (2, MODEL_TIMER), (4, MODEL_HEAT))
     result = await run_scan(hass, result, found)
@@ -360,7 +489,7 @@ async def test_a_legacy_scan_all_entry_still_offers_the_whole_range(
     assert result["data_schema"]({})[CONF_UNIT_IDS] == "1-32"
 
     result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], {CONF_UNIT_IDS: "1-32", CONF_REGISTER_OFFSET: "auto"}
+        result["flow_id"], {CONF_UNIT_IDS: "1-32"}
     )
     result = await run_scan(hass, result, discovered(words, (1, MODEL_HEAT)))
     result = await hass.config_entries.flow.async_configure(

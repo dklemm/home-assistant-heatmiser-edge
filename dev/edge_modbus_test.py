@@ -48,6 +48,8 @@ from custom_components.heatmiser_edge.const import (  # noqa: E402
     REG_PROGRAM_TYPE,
     REG_RTC,
     RTC_BLOCK,
+    DEFAULT_REGISTER_OFFSET,
+    REGISTER_OFFSETS,
     SCAN_TIMEOUT,
     TRANSPORT_SERIAL,
     TRANSPORT_TCP,
@@ -57,11 +59,8 @@ from custom_components.heatmiser_edge.decode import (  # noqa: E402
     encode_rtc,
 )
 from custom_components.heatmiser_edge.detect import (  # noqa: E402
-    OFFSETS,
     guess_model,
     parse_id_list,
-    resolve_offset,
-    score_offset,
 )
 from custom_components.heatmiser_edge.hub import (  # noqa: E402
     EdgeConnectionError,
@@ -88,7 +87,7 @@ RISKY = {
 
 
 def build_hub(args: argparse.Namespace, timeout: float | None = None) -> EdgeHub:
-    offset = None if args.offset == "auto" else int(args.offset)
+    offset = int(args.offset)
     if args.port:
         return EdgeHub(
             transport=TRANSPORT_SERIAL,
@@ -111,46 +110,35 @@ def build_hub(args: argparse.Namespace, timeout: float | None = None) -> EdgeHub
 
 
 async def cmd_detect(args: argparse.Namespace) -> int:
-    """Decide the register base, printing the evidence for every unit."""
+    """Print register 31 at both candidate bases, so a human can read it off.
+
+    Register 31 is the id we addressed, so the base it reads back correctly under
+    is the right one. Run this when the integration warns that a stat disagrees.
+    """
     hub = build_hub(args, timeout=SCAN_TIMEOUT)
-    hub.register_offset = None
     unit_ids = parse_id_list(args.ids)
     try:
-        await hub.async_connect([])
+        await hub.async_connect()
         print(f"Probing manual registers 30-34 on ids {args.ids}\n")
-        print(f"{'unit':>4}  {'offset':>7}  {'reg31':>6}  {'reg32':>6}  {'reg33':>6}  verdict")
-        votes: dict[int, int | None] = {}
+        print(f"{'unit':>4}  {'offset':>7}  {'reg31':>6}  verdict")
+        answered = False
         for unit_id in unit_ids:
-            probes: dict[int, dict[int, int]] = {}
-            for candidate in OFFSETS:
-                words = await hub.async_probe_unit(unit_id, candidate)
-                if words is not None:
-                    probes[candidate] = words
-            if not probes:
-                continue
-            verdict = score_offset(probes, unit_id)
-            votes[unit_id] = verdict
-            for candidate, words in probes.items():
-                mark = "<-- register 31 reads its own id" if verdict == candidate else ""
-                print(
-                    f"{unit_id:>4}  {candidate:>7}  {words.get(31, 0):>6}  "
-                    f"{words.get(32, 0):>6}  {words.get(33, 0):>6}  {mark}"
-                )
-            if verdict is None:
-                print(f"{unit_id:>4}  {'':>7}  {'':>6}  {'':>6}  {'':>6}  ambiguous on this unit")
-        if not votes:
+            for candidate in REGISTER_OFFSETS:
+                hub.register_offset = candidate
+                words = await hub.async_probe_unit(unit_id)
+                if words is None:
+                    continue
+                answered = True
+                reads_own_id = words.get(31) == unit_id
+                mark = "<-- register 31 reads its own id" if reads_own_id else ""
+                print(f"{unit_id:>4}  {candidate:>7}  {words.get(31, 0):>6}  {mark}")
+        if not answered:
             print("\nNo thermostat answered at either offset.")
             print("Check: A/B polarity, bus termination, the stat's Communications ID")
             print("(0 disables Modbus entirely), and on a gateway try --framer rtu.")
             return 1
-        offset, decisive = resolve_offset(votes)
-        base = "1-based (manual N at wire N)" if offset == 0 else "0-based (manual N at wire N-1)"
-        print(f"\nVerdict: offset {offset} — {base}")
-        if not decisive:
-            print("No unit was decisive; this is the fallback, not evidence.")
-            print("A thermostat with id 6 or above always settles it — try one.")
-        else:
-            print("Record this in CLAUDE.md so nobody re-derives it.")
+        print("\nA unit id of 6 or above is decisive: nothing else in the 30-34")
+        print("window can hold a value that high. On id 1 both bases can read 1.")
         return 0
     finally:
         await hub.async_close()
@@ -161,7 +149,7 @@ async def cmd_scan(args: argparse.Namespace) -> int:
     hub = build_hub(args, timeout=SCAN_TIMEOUT)
     unit_ids = parse_id_list(args.ids)
     try:
-        await hub.async_connect(unit_ids)
+        await hub.async_connect()
         print(f"Register offset: {hub.register_offset}\n")
         print(f"{'unit':>4}  {'model':>6}  {'heat':>4}  {'timer':>5}  {'conf':>4}  firmware  note")
         found = 0
@@ -186,7 +174,7 @@ async def cmd_dump(args: argparse.Namespace) -> int:
     """Every register of one thermostat, raw and decoded."""
     hub = build_hub(args)
     try:
-        await hub.async_connect([args.unit])
+        await hub.async_connect()
         words = await hub.async_read_block(args.unit, POLL_START, POLL_COUNT)
         if words is None:
             print(f"Unit {args.unit} did not answer.")
@@ -227,7 +215,7 @@ async def cmd_schedule(args: argparse.Namespace) -> int:
     """
     hub = build_hub(args)
     try:
-        await hub.async_connect([args.unit])
+        await hub.async_connect()
         block = await hub.async_read_block(args.unit, POLL_START, POLL_COUNT)
         if block is None:
             print(f"Unit {args.unit} did not answer.")
@@ -275,7 +263,7 @@ def _row(model: str, row: dict) -> str:
 async def cmd_read(args: argparse.Namespace) -> int:
     hub = build_hub(args)
     try:
-        await hub.async_connect([args.unit])
+        await hub.async_connect()
         words = await hub.async_read_block(args.unit, args.register, 1)
         if words is None:
             print(f"Unit {args.unit} did not answer.")
@@ -294,7 +282,7 @@ async def cmd_read(args: argparse.Namespace) -> int:
 async def cmd_poll(args: argparse.Namespace) -> int:
     hub = build_hub(args)
     try:
-        await hub.async_connect([args.unit])
+        await hub.async_connect()
         while True:
             words = await hub.async_read_block(args.unit, args.register, 1)
             value = "silent" if words is None else words[args.register]
@@ -316,7 +304,7 @@ async def cmd_write(args: argparse.Namespace) -> int:
         print(f"WARNING: register {args.register} {RISKY[args.register]}.")
     hub = build_hub(args)
     try:
-        await hub.async_connect([args.unit])
+        await hub.async_connect()
         await hub.async_write_register(args.unit, args.register, args.value)
         # Read back: the stat may clamp an out-of-range value without saying so.
         words = await hub.async_read_block(args.unit, args.register, 1)
@@ -346,7 +334,7 @@ async def cmd_settime(args: argparse.Namespace) -> int:
     )
     hub = build_hub(args)
     try:
-        await hub.async_connect([args.unit])
+        await hub.async_connect()
         if args.dst is not None:
             await hub.async_write_register(args.unit, REG_DST_ENABLED, args.dst)
             print(f"daylight saving (register 30) set to {args.dst}")
@@ -406,9 +394,9 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=1.0)
     parser.add_argument(
         "--offset",
-        default="auto",
-        choices=("auto", "-1", "0"),
-        help="register base; auto probes for it",
+        default=str(DEFAULT_REGISTER_OFFSET),
+        choices=tuple(str(o) for o in REGISTER_OFFSETS),
+        help="register base (see `detect`)",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 

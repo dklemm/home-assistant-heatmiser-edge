@@ -3,11 +3,12 @@
     user -> serial | tcp -> scan (with progress) -> confirm -> entry
 
 The scan is the interesting step. Sweeping unit ids at 9600 baud costs a full
-timeout for every id that isn't there, so two things keep it bearable: the probe
-reads five registers rather than fifty, and it runs behind a real progress
-dialog instead of a frozen form. That is what lets the default be the whole
-1-32 range - one field, asked once, and nobody has to know their thermostats'
-ids to get started. A user who does know can narrow it and save the wait.
+timeout for every id that isn't there, so three things keep it bearable: the
+probe reads five registers rather than fifty, it runs behind a real progress
+dialog instead of a frozen form, and that dialog names the id it is on and the
+thermostats found so far. That is what lets the default be the whole 1-32 range
+- one field, asked once, and nobody has to know their thermostats' ids to get
+started. A user who does know can narrow it and save the wait.
 
 The confirm step exists because the manual gives no model or product-id
 register. `detect.guess_model` scores a Heat against a Timer and is right by a
@@ -61,6 +62,7 @@ from .const import (
     DEFAULT_BAUDRATE,
     DEFAULT_BYTESIZE,
     DEFAULT_PARITY,
+    DEFAULT_REGISTER_OFFSET,
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_STOPBITS,
     DEFAULT_TCP_PORT,
@@ -78,10 +80,12 @@ from .const import (
     MODELS,
     POLL_COUNT,
     POLL_START,
+    SCAN_PROGRESS_INTERVAL,
     SCAN_TIMEOUT,
     TRANSPORT_SERIAL,
     TRANSPORT_TCP,
 )
+from .coordinator import option
 from .detect import ModelGuess, guess_model, parse_id_list
 from .hub import EdgeConnectionError, EdgeHub
 
@@ -100,7 +104,6 @@ _MODEL_OPTIONS = [
     SelectOptionDict(value=model, label=MODEL_LABELS[model]) for model in MODELS
 ]
 _OFFSET_OPTIONS = [
-    SelectOptionDict(value="auto", label="Detect automatically"),
     SelectOptionDict(value="-1", label="0-based (register N at address N-1)"),
     SelectOptionDict(value="0", label="1-based (register N at address N)"),
 ]
@@ -111,18 +114,17 @@ _FRAMER_OPTIONS = [
 
 
 def _common_schema(defaults: dict[str, Any]) -> dict:
-    """The fields both transports share: what to scan, and how to address it."""
+    """The field both transports share: which unit ids to sweep.
+
+    The register base is deliberately *not* asked here. It has one right answer
+    on every device seen, a first-time user has no way to know theirs, and
+    `EdgeHub._check_register_base` reports it when the answer is wrong - so it
+    lives in the options flow, where someone acts on that warning.
+    """
     return {
         vol.Required(
             CONF_UNIT_IDS, default=defaults.get(CONF_UNIT_IDS, DEFAULT_UNIT_IDS)
         ): TextSelector(),
-        vol.Required(
-            CONF_REGISTER_OFFSET, default=defaults.get(CONF_REGISTER_OFFSET, "auto")
-        ): SelectSelector(
-            SelectSelectorConfig(
-                options=_OFFSET_OPTIONS, mode=SelectSelectorMode.DROPDOWN
-            )
-        ),
     }
 
 
@@ -130,7 +132,9 @@ SERIAL_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_SERIAL_PORT): TextSelector(),
         vol.Required(CONF_BAUDRATE, default=DEFAULT_BAUDRATE): vol.Coerce(int),
-        vol.Required(CONF_BYTESIZE, default=DEFAULT_BYTESIZE): vol.In([5, 6, 7, 8]),
+        # 7 and 8 only: Modbus RTU frames are 8-bit, and modbus-connection's
+        # serial params type the field that way. 5 and 6 were never usable here.
+        vol.Required(CONF_BYTESIZE, default=DEFAULT_BYTESIZE): vol.In([7, 8]),
         vol.Required(CONF_PARITY, default=DEFAULT_PARITY): vol.In(["N", "E", "O"]),
         vol.Required(CONF_STOPBITS, default=DEFAULT_STOPBITS): vol.In([1, 2]),
         **_common_schema({}),
@@ -173,7 +177,6 @@ def bus_unique_id(data: dict[str, Any]) -> str:
 
 def build_scan_hub(data: dict[str, Any]) -> EdgeHub:
     """A hub for discovery: short timeout, so silent ids are cheap."""
-    offset = data.get(CONF_REGISTER_OFFSET, "auto")
     return EdgeHub(
         transport=data[CONF_TRANSPORT],
         serial_port=data.get(CONF_SERIAL_PORT),
@@ -185,28 +188,22 @@ def build_scan_hub(data: dict[str, Any]) -> EdgeHub:
         port=data.get(CONF_PORT, DEFAULT_TCP_PORT),
         framer=data.get(CONF_FRAMER, FRAMER_RTU),
         timeout=SCAN_TIMEOUT,
-        register_offset=None if offset == "auto" else int(offset),
+        register_offset=int(data.get(CONF_REGISTER_OFFSET, DEFAULT_REGISTER_OFFSET)),
     )
 
 
-async def async_scan_bus(
-    data: dict[str, Any], unit_ids: list[int]
-) -> tuple[int, list[DiscoveredUnit]]:
-    """Settle the register base, then find out who is on the wire."""
-    hub = build_scan_hub(data)
-    try:
-        await hub.async_connect(unit_ids)
-        found: list[DiscoveredUnit] = []
-        for unit_id in unit_ids:
-            if await hub.async_probe_unit(unit_id) is None:
-                continue
-            words = await hub.async_read_block(unit_id, POLL_START, POLL_COUNT)
-            if words is None:
-                continue
-            found.append(DiscoveredUnit(unit_id, guess_model(words), words))
-        return hub.register_offset, found
-    finally:
-        await hub.async_close()
+# Enough ids to be useful, few enough that the line cannot wrap and shift the
+# dialog's layout part way through a sweep.
+_MAX_FOUND_SHOWN = 8
+
+
+def _found_summary(found: list[DiscoveredUnit]) -> str:
+    """What the sweep has turned up so far, for the progress dialog."""
+    if not found:
+        return "none yet"
+    shown = ", ".join(str(f.unit_id) for f in found[:_MAX_FOUND_SHOWN])
+    extra = len(found) - _MAX_FOUND_SHOWN
+    return f"{shown} and {extra} more" if extra > 0 else shown
 
 
 class EdgeConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -220,6 +217,8 @@ class EdgeConfigFlow(ConfigFlow, domain=DOMAIN):
         self._found: list[DiscoveredUnit] = []
         self._scan_task: asyncio.Task | None = None
         self._scan_error: str | None = None
+        self._scan_index = 0
+        self._scan_hub: EdgeHub | None = None
 
     @property
     def _reconfiguring(self) -> bool:
@@ -271,35 +270,100 @@ class EdgeConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_scan(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Sweep the bus behind a progress dialog.
+        """Sweep the bus behind a progress dialog, one unit id at a time.
 
         A full 1-32 sweep is around 18 seconds even when nothing answers, which
-        is far too long to leave a form looking frozen.
+        is far too long to leave a form looking frozen - and too long to say
+        nothing about what it is doing.
+
+        The dialog's text is fixed for as long as a task runs: Home Assistant
+        re-enters this step when a `progress_task` finishes, and only then does a
+        new `async_show_progress` reach the frontend. So a task is a re-render,
+        and the text can only change at a task boundary.
+
+        One task therefore covers *a second's worth of ids*, not one id. Probing
+        a present stat takes ~150 ms and an absent one pays a full SCAN_TIMEOUT,
+        so a task per id re-renders at wildly uneven intervals and the dialog
+        stutters.
+
+        There is deliberately no `async_update_progress` here. Setting a progress
+        value switches `ha-circular-progress` from its indeterminate spinner to a
+        determinate ring, and a re-render drops the value again - so a percentage
+        makes the dialog flip between two differently-sized widgets on every
+        batch, which jumps far worse than it informs. The count is in the text.
         """
-        if self._scan_task is None:
+        if self._scan_task is not None and self._scan_task.done():
+            self._scan_task = None
+        if (
+            self._scan_task is None
+            and self._scan_error is None
+            and self._scan_index < len(self._unit_ids)
+        ):
             self._scan_task = self.hass.async_create_task(
-                self._async_run_scan(), eager_start=False
+                self._async_probe_batch(), eager_start=False
             )
-        if not self._scan_task.done():
+
+        if self._scan_task is not None:
             return self.async_show_progress(
                 step_id="scan",
                 progress_action="scanning",
                 progress_task=self._scan_task,
+                description_placeholders={
+                    "unit": str(self._unit_ids[self._scan_index]),
+                    "position": str(self._scan_index + 1),
+                    "total": str(len(self._unit_ids)),
+                    "found": _found_summary(self._found),
+                },
             )
-        self._scan_task = None
-        if self._scan_error:
-            return self.async_show_progress_done(next_step_id="failed")
-        return self.async_show_progress_done(next_step_id="confirm")
 
-    async def _async_run_scan(self) -> None:
+        await self._async_close_scan_hub()
+        if self._scan_error is None and not self._found:
+            self._scan_error = "no_thermostats_found"
+        return self.async_show_progress_done(
+            next_step_id="failed" if self._scan_error else "confirm"
+        )
+
+    async def _async_probe_batch(self) -> None:
+        """Probe ids until the dialog is due a re-render, or the sweep ends."""
+        deadline = self.hass.loop.time() + SCAN_PROGRESS_INTERVAL
+        while self._scan_index < len(self._unit_ids):
+            if not await self._async_probe_one(self._unit_ids[self._scan_index]):
+                return
+            self._scan_index += 1
+            if self.hass.loop.time() >= deadline:
+                return
+
+    async def _async_probe_one(self, unit_id: int) -> bool:
+        """Probe one id, reading it properly if it answers. False stops the sweep."""
         try:
-            offset, self._found = await async_scan_bus(self._data, self._unit_ids)
+            if self._scan_hub is None:
+                self._scan_hub = build_scan_hub(self._data)
+                await self._scan_hub.async_connect()
+            if await self._scan_hub.async_probe_unit(unit_id) is not None:
+                words = await self._scan_hub.async_read_block(
+                    unit_id, POLL_START, POLL_COUNT
+                )
+                if words is not None:
+                    self._found.append(
+                        DiscoveredUnit(unit_id, guess_model(words), words)
+                    )
         except EdgeConnectionError as err:
+            # The bus itself, not this id: there is nothing left to sweep.
             _LOGGER.debug("Scan failed: %s", err)
             self._scan_error = "cannot_connect"
-            return
-        self._data[CONF_REGISTER_OFFSET] = offset
-        self._scan_error = None if self._found else "no_thermostats_found"
+            return False
+        return True
+
+    async def _async_close_scan_hub(self) -> None:
+        if self._scan_hub is not None:
+            await self._scan_hub.async_close()
+            self._scan_hub = None
+
+    @callback
+    def async_remove(self) -> None:
+        """Let go of the bus if the user abandons the flow mid-sweep."""
+        if self._scan_hub is not None:
+            self.hass.async_create_task(self._async_close_scan_hub())
 
     async def async_step_failed(
         self, user_input: dict[str, Any] | None = None
@@ -365,7 +429,6 @@ class EdgeConfigFlow(ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema(fields),
             description_placeholders={
                 "count": str(len(self._found)),
-                "offset": _offset_label(self._data.get(CONF_REGISTER_OFFSET)),
                 "unsure": ", ".join(str(u) for u in unsure) or "none",
             },
         )
@@ -382,7 +445,16 @@ class EdgeConfigFlow(ConfigFlow, domain=DOMAIN):
         entry = self._get_reconfigure_entry()
         transport = entry.data[CONF_TRANSPORT]
         if user_input is not None:
-            self._data = {**entry.data, **user_input, CONF_TRANSPORT: transport}
+            self._data = {
+                **entry.data,
+                **user_input,
+                CONF_TRANSPORT: transport,
+                # The base is an option now, so it may have moved since setup.
+                # Re-scanning at the wrong one would find nothing.
+                CONF_REGISTER_OFFSET: option(
+                    entry, CONF_REGISTER_OFFSET, DEFAULT_REGISTER_OFFSET
+                ),
+            }
             # The form has just answered the same question the flag used to;
             # leaving it behind would only invite something to read it again.
             self._data.pop(_LEGACY_SCAN_ALL, None)
@@ -402,7 +474,6 @@ class EdgeConfigFlow(ConfigFlow, domain=DOMAIN):
     @staticmethod
     def _reconfigure_schema(entry: ConfigEntry) -> vol.Schema:
         """Only the discovery fields; the connection itself is unchanged."""
-        stored = entry.data.get(CONF_REGISTER_OFFSET)
         # An entry set up with the old "scan every ID" flag stored an id list
         # that was never used. Showing that list would silently narrow the
         # re-scan, so the flag is spelled out as the range it always meant.
@@ -412,14 +483,7 @@ class EdgeConfigFlow(ConfigFlow, domain=DOMAIN):
             else entry.data.get(CONF_UNIT_IDS, DEFAULT_UNIT_IDS)
         )
         return vol.Schema(
-            _common_schema(
-                {
-                    CONF_UNIT_IDS: unit_ids,
-                    CONF_REGISTER_OFFSET: (
-                        "auto" if stored is None else str(stored)
-                    ),
-                }
-            )
+            _common_schema({CONF_UNIT_IDS: unit_ids})
         )
 
     def _bus_label(self) -> str:
@@ -431,14 +495,6 @@ class EdgeConfigFlow(ConfigFlow, domain=DOMAIN):
     @callback
     def async_get_options_flow(config_entry: ConfigEntry) -> EdgeOptionsFlow:
         return EdgeOptionsFlow()
-
-
-def _offset_label(offset: Any) -> str:
-    if offset == 0:
-        return "1-based (register N at address N)"
-    if offset == -1:
-        return "0-based (register N at address N-1)"
-    return "not determined"
 
 
 class EdgeOptionsFlow(OptionsFlow):
@@ -467,18 +523,16 @@ class EdgeOptionsFlow(OptionsFlow):
                 }
                 for unit in current(CONF_UNITS, [])
             ]
-            offset = user_input[CONF_REGISTER_OFFSET]
             return self.async_create_entry(
                 data={
                     CONF_SCAN_INTERVAL: int(user_input[CONF_SCAN_INTERVAL]),
                     CONF_TIMEOUT: float(user_input[CONF_TIMEOUT]),
                     CONF_CONTROLS: user_input[CONF_CONTROLS],
-                    CONF_REGISTER_OFFSET: None if offset == "auto" else int(offset),
+                    CONF_REGISTER_OFFSET: int(user_input[CONF_REGISTER_OFFSET]),
                     CONF_UNITS: units,
                 }
             )
 
-        stored_offset = current(CONF_REGISTER_OFFSET, None)
         fields: dict[Any, Any] = {
             vol.Required(
                 CONF_SCAN_INTERVAL,
@@ -508,7 +562,7 @@ class EdgeOptionsFlow(OptionsFlow):
             ): BooleanSelector(),
             vol.Required(
                 CONF_REGISTER_OFFSET,
-                default="auto" if stored_offset is None else str(stored_offset),
+                default=str(current(CONF_REGISTER_OFFSET, DEFAULT_REGISTER_OFFSET)),
             ): SelectSelector(
                 SelectSelectorConfig(
                     options=_OFFSET_OPTIONS, mode=SelectSelectorMode.DROPDOWN

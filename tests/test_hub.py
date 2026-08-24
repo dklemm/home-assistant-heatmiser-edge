@@ -1,16 +1,27 @@
-"""The bus layer, against a fake pymodbus client.
+"""The bus layer, against modbus-connection's in-memory mock.
 
-These are the tests that matter most on real hardware, because the RS485 bus is
-unforgiving in ways nothing above the hub can compensate for: it is half-duplex,
-it is shared by every thermostat, and the manual demands a gap between
-transactions. Getting any of that wrong produces intermittent CRC errors that
-look like bad wiring.
+These matter most on real hardware: the wire is half-duplex and shared, and
+getting the pacing wrong produces intermittent CRC errors that look like bad
+wiring.
+
+The double is the library's `MockModbusConnection`, so the stores and error paths
+come from upstream. `_BusUnit` adds what a *bus* test needs and a device mock
+does not provide: time on the wire, and the pacing wrapper the real backend puts
+around every operation. Using the connection's own `_pacer` is deliberate - it
+makes the gap and the lock asserted here the library's real implementation.
 """
 
 import asyncio
 
 import pytest
-from pymodbus.exceptions import ConnectionException, ModbusIOException
+from modbus_connection import (
+    IllegalDataAddressError,
+    IllegalDataValueError,
+    ModbusConnectionError,
+    ModbusTimeoutError,
+)
+from modbus_connection._pacing import Pacer
+from modbus_connection.mock import MockModbusConnection, MockModbusUnit
 
 from custom_components.heatmiser_edge.const import (
     INTER_TRANSACTION_GAP,
@@ -19,98 +30,113 @@ from custom_components.heatmiser_edge.const import (
     UNIT_BACKOFF_AFTER,
     UNIT_BACKOFF_EVERY,
 )
-from custom_components.heatmiser_edge.detect import OFFSETS
 from custom_components.heatmiser_edge.hub import EdgeConnectionError, EdgeHub
 
 # Wall-clock assertions need a little slack for the event loop's own scheduling.
 TOLERANCE = 0.008
 
+# Enough seeded registers to cover every address these tests read.
+SEEDED = 400
 
-class _Response:
-    def __init__(self, registers=None, error=False):
-        self.registers = registers or []
-        self._error = error
-
-    def isError(self):
-        return self._error
+# pymodbus's `count_until_disconnect`: `retries + 3`, and the library sets 0.
+DISCONNECT_AFTER = 3
 
 
-class FakeClient:
-    """A pymodbus client that records what and when, and can play dead.
+class _BusUnit(MockModbusUnit):
+    """Paced like `PymodbusUnit` - connect, then run inside `Pacer.paced`.
 
-    `spans` records (started, finished) for every transaction, which is how the
-    lock and the inter-transaction gap are asserted: overlapping spans mean two
-    requests were on a half-duplex wire at once.
-
-    It also models the real client's disconnect budget, because that is a
-    behaviour the hub has to survive rather than an artefact worth faking:
-    pymodbus counts *consecutive* silences and closes the connection once they
-    pass `retries + 3`, resetting the count on any success. With the hub's
-    `retries=1` that is 6, which a discovery scan of a mostly-empty bus reaches
-    easily. `port_alive` is the distinction that matters - a port pymodbus gave
-    up on reconnects, a port that is genuinely gone does not.
+    Without this the mock answers instantly and every gap assertion is vacuous.
     """
 
-    def __init__(
-        self, *, silent_units=(), connected=True, latency=0.005, disconnect_after=6
-    ):
-        self.reads: list[tuple[int, int, int]] = []  # (device_id, address, count)
-        self.writes: list[tuple[int, int, int]] = []  # (device_id, address, value)
-        self.block_writes: list[tuple[int, int, list[int]]] = []
-        self.spans: list[tuple[float, float]] = []
+    async def _on_the_wire(self, operation, /, *args):
+        await self._conn.connect()
+        async with self._conn._pacer.paced(self._unit_id):
+            # Timed inside the pacer: a span is wire time, not the gap before it.
+            started = asyncio.get_running_loop().time()
+            try:
+                await asyncio.sleep(self._conn.latency)
+                if (err := self._conn.answer_for(self._unit_id)) is not None:
+                    raise err
+                return await operation(*args)
+            finally:
+                self._conn.spans.append((started, asyncio.get_running_loop().time()))
+
+    async def read_holding_registers(self, address, count):
+        self._conn.reads.append((self._unit_id, address, count))
+        return await self._on_the_wire(
+            super().read_holding_registers, address, count
+        )
+
+    async def write_register(self, address, value):
+        self._conn.writes.append((self._unit_id, address, value))
+        return await self._on_the_wire(super().write_register, address, value)
+
+    async def write_registers(self, address, values):
+        self._conn.block_writes.append((self._unit_id, address, list(values)))
+        return await self._on_the_wire(super().write_registers, address, list(values))
+
+
+class _BusMock(MockModbusConnection):
+    """The bus: several units, one wire, one gap.
+
+    `spans` is (started, finished) per transaction - overlapping spans mean two
+    requests were on a half-duplex wire at once.
+
+    It also models pymodbus's disconnect budget, which the hub has to survive:
+    silences past the budget drop the link and *raise* rather than time out, and
+    any success resets the count. `dead` is the distinction that matters - a link
+    pymodbus gave up on reconnects, a port that is gone does not.
+    """
+
+    def __init__(self, *, silent_units=(), latency=0.005, dead=False):
+        super().__init__()
+        # The hub sets this on the real connection through the constructor; the
+        # mock's takes no parameters, so give its pacer the same gap directly.
+        self._pacer = Pacer(INTER_TRANSACTION_GAP)
         self.silent_units = set(silent_units)
-        self.connected = connected
-        self.port_alive = connected
         self.latency = latency
-        self.disconnect_after = disconnect_after
+        self.dead = dead
         self.connect_calls = 0
+        self.drop_next_request = False
+        self.spans: list[tuple[float, float]] = []
+        self.reads: list[tuple[int, int, int]] = []  # (unit_id, address, count)
+        self.writes: list[tuple[int, int, int]] = []  # (unit_id, address, value)
+        self.block_writes: list[tuple[int, int, list[int]]] = []
+        self.write_events: dict[int, list] = {}  # the library's own WriteEvents
         self._silences = 0
 
-    async def connect(self):
+    async def _connect_client(self):
         self.connect_calls += 1
-        self.connected = self.port_alive
+        if self.dead:
+            raise ModbusConnectionError(f"could not connect to {self._target}")
         self._silences = 0
-        return self.connected
+        return object()
 
-    def close(self):
-        self.connected = False
+    def for_unit(self, unit_id):
+        if unit_id not in self._units:
+            unit = self._units[unit_id] = _BusUnit(self, unit_id)
+            # Address-encoded, so the offset arithmetic shows in the values.
+            unit.holding[0] = list(range(SEEDED))
+            unit.on_write(self.write_events.setdefault(unit_id, []).append)
+        return self._units[unit_id]
 
-    async def _run(self, unit_id):
-        started = asyncio.get_running_loop().time()
-        await asyncio.sleep(self.latency)
-        self.spans.append((started, asyncio.get_running_loop().time()))
-        if not self.connected:
-            raise ConnectionException("Not connected")
-        if unit_id in self.silent_units:
-            self._silences += 1
-            if self._silences >= self.disconnect_after:
-                # pymodbus closes the port itself here. Nothing is wrong with it.
-                self.connected = False
-            raise ModbusIOException("No response received")
-        self._silences = 0
-
-    async def read_holding_registers(self, address, count=1, device_id=1):
-        self.reads.append((device_id, address, count))
-        await self._run(device_id)
-        # Encode the address in the value so the offset arithmetic is visible.
-        return _Response([address + i for i in range(count)])
-
-    async def write_register(self, address, value, device_id=1):
-        self.writes.append((device_id, address, value))
-        await self._run(device_id)
-        return _Response()
-
-    async def write_registers(self, address, values, device_id=1):
-        self.block_writes.append((device_id, address, list(values)))
-        await self._run(device_id)
-        return _Response()
+    def answer_for(self, unit_id):
+        """The error a request to `unit_id` gets, or None to let it through."""
+        silent = unit_id in self.silent_units
+        self._silences = self._silences + 1 if silent else 0
+        if self.drop_next_request or self._silences >= DISCONNECT_AFTER:
+            # Out of patience. pymodbus drops the link and raises; the port is fine.
+            self.drop_next_request = False
+            self.simulate_connection_lost()
+            return ModbusConnectionError("connection lost")
+        return ModbusTimeoutError("No response received") if silent else None
 
 
-def make_hub(**kwargs) -> tuple[EdgeHub, FakeClient]:
-    client = FakeClient(**kwargs)
+def make_hub(**kwargs) -> tuple[EdgeHub, _BusMock]:
+    bus = _BusMock(**kwargs)
     hub = EdgeHub(transport=TRANSPORT_TCP, host="127.0.0.1", register_offset=-1)
-    hub._client = client
-    return hub, client
+    hub._connection = bus
+    return hub, bus
 
 
 async def test_wire_applies_the_offset_but_results_come_back_in_manual_numbers():
@@ -125,19 +151,9 @@ async def test_wire_applies_the_offset_but_results_come_back_in_manual_numbers()
     assert client.reads[-1] == (1, 1, 5)
 
 
-async def test_an_unsettled_offset_still_lets_a_probe_run():
-    """Detection has to read something before it has an answer."""
-    hub, client = make_hub()
-    hub.register_offset = None
-    await hub.async_read_block(1, 30, 5)
-    assert client.reads == [(1, 29, 5)]
-
-
 async def test_transactions_are_paced_across_different_units():
-    """The gap is a property of the wire, not of one thermostat.
-
-    Pacing per unit would let two stats be polled back to back with no gap at
-    all - which is exactly what a poll of several thermostats does.
+    """The gap belongs to the wire, not one thermostat: pacing per unit would let
+    two stats be polled back to back with no gap, which is what a poll does.
     """
     hub, client = make_hub()
     await hub.async_read_block(1, 1, 50)
@@ -176,10 +192,20 @@ async def test_the_gap_is_the_time_remaining_not_a_flat_sleep():
     Without this the gap would tax every poll, even at a 60 s interval.
     """
     hub, _ = make_hub(latency=0)
-    hub._next_free = asyncio.get_running_loop().time() - 1.0  # long since free
+    await hub.async_read_block(1, 1, 50)
+    await asyncio.sleep(INTER_TRANSACTION_GAP * 2)  # the wire has long been free
+
     started = asyncio.get_running_loop().time()
     await hub.async_read_block(1, 1, 50)
     assert asyncio.get_running_loop().time() - started < INTER_TRANSACTION_GAP
+
+
+async def test_the_gap_is_what_serialises_the_bus():
+    """`Pacer` takes no lock when the spacing is zero, so setting the gap to zero
+    would quietly put two requests on a half-duplex wire at once.
+    """
+    hub = EdgeHub(transport=TRANSPORT_TCP, host="127.0.0.1")
+    assert hub._connection._pacer._message_spacing == INTER_TRANSACTION_GAP
 
 
 async def test_a_timed_out_unit_still_paces_what_follows():
@@ -200,80 +226,73 @@ async def test_a_silent_unit_is_not_an_error():
 
 async def test_a_dead_bus_raises():
     """The port being gone is a different problem with a different fix."""
-    hub, _ = make_hub(connected=False)
+    hub, _ = make_hub(dead=True)
     with pytest.raises(EdgeConnectionError):
         await hub.async_read_block(1, 1, 50)
 
 
 async def test_a_run_of_absent_ids_does_not_take_the_bus_down():
-    """The config-flow scan: ids 1-8 on a bus holding one thermostat.
+    """The config-flow scan: ids 1-32 on a bus holding one thermostat.
 
-    pymodbus closes the port after six consecutive silences, so every id after
-    the sixth used to fail as a *bus* error - which meant the default scan range
-    could never find a thermostat sitting at the end of it.
+    Past the disconnect budget pymodbus raises rather than timing out, so without
+    the retry the default scan range could never find a stat at the end of it.
     """
-    hub, client = make_hub(silent_units=set(range(2, 10)))
+    hub, bus = make_hub(silent_units=set(range(2, 10)))
 
     for unit_id in range(2, 10):
-        # Each absent id reports itself absent - never as a bus failure, even
-        # once pymodbus has closed the port underneath us mid-sweep.
+        # Absent, never a bus failure - even once the link has dropped mid-sweep.
         assert await hub.async_read_block(unit_id, 1, 50) is None
 
-    assert client.connect_calls, "the fake never reached pymodbus's disconnect"
+    assert bus.connect_calls > 1, "the run never exhausted the disconnect budget"
     assert await hub.async_read_block(1, 1, 50) is not None
 
 
 async def test_the_reconnect_is_attempted_once_not_in_a_loop():
     """A port that is really gone must still fail, and fail promptly."""
-    hub, client = make_hub(connected=False)
+    hub, bus = make_hub(dead=True)
     with pytest.raises(EdgeConnectionError):
         await hub.async_read_block(1, 1, 50)
-    assert client.connect_calls == 1
+    # The request itself, and the retry. Not a third.
+    assert bus.connect_calls == 2
 
 
 async def test_a_write_survives_the_same_spurious_disconnect():
     """Re-sending one FC06 is idempotent, so writes get the retry too."""
-    hub, client = make_hub(silent_units={9})
-    for _ in range(client.disconnect_after):
-        assert await hub.async_read_block(9, 1, 50) is None
-    assert not client.connected
+    hub, bus = make_hub()
+    bus.drop_next_request = True
 
     await hub.async_write_register(1, 34, 215)
-    assert client.writes[-1] == (1, 33, 215)  # manual 34 -> wire 33
+    assert bus.writes[-1] == (1, 33, 215)  # manual 34 -> wire 33
 
 
 async def test_an_error_response_reads_as_silence():
-    hub, client = make_hub()
-
-    async def error_response(address, count=1, device_id=1):
-        return _Response(error=True)
-
-    client.read_holding_registers = error_response
+    """Present, but refusing these registers, is still no words to publish."""
+    hub, bus = make_hub()
+    bus.for_unit(1).fail_read(0, IllegalDataAddressError())
     assert await hub.async_read_block(1, 1, 50) is None
 
 
 async def test_writes_use_fc06_not_fc16():
-    """The manual allows both; FC06 echoes the value the stat actually kept."""
-    hub, client = make_hub()
+    """The manual allows both; one control writes one complete value."""
+    hub, bus = make_hub()
     await hub.async_write_register(3, 34, 215)
-    assert client.writes == [(3, 33, 215)]  # manual 34 -> wire 33
-    assert client.block_writes == []
+    assert bus.writes == [(3, 33, 215)]  # manual 34 -> wire 33
+    assert bus.block_writes == []
+    assert [e.function_code for e in bus.write_events[3]] == [0x06]
 
 
 async def test_fc16_exists_for_the_blocks_that_need_it():
     """Not used in v1, but the RTC and away blocks must move atomically."""
-    hub, client = make_hub()
+    hub, bus = make_hub()
     await hub.async_write_registers(1, 47, [2026, 0x0C19, 0x0917, 30])
-    assert client.block_writes == [(1, 46, [2026, 0x0C19, 0x0917, 30])]
+    assert bus.block_writes == [(1, 46, [2026, 0x0C19, 0x0917, 30])]
+    assert [e.function_code for e in bus.write_events[1]] == [0x10]
 
 
 async def test_a_rejected_write_raises():
-    hub, client = make_hub()
-
-    async def rejected(address, value, device_id=1):
-        return _Response(error=True)
-
-    client.write_register = rejected
+    """A write that does nothing to a heating system is never shrugged off."""
+    hub, bus = make_hub()
+    bus.for_unit(1).fail_write(33, IllegalDataValueError())
     with pytest.raises(EdgeConnectionError):
         await hub.async_write_register(1, 34, 215)
 
@@ -329,54 +348,73 @@ async def test_a_missing_thermostat_backs_off_and_recovers():
     assert hub.unit_failures[2] == 0
 
 
-async def test_detect_offset_settles_the_bus_from_a_decisive_unit(words):
-    """End to end through the hub: probe both offsets, then commit to one."""
-    truth = {7: words.heat(7)}
-    hub, client = make_hub()
-    hub.register_offset = None
+async def test_a_shifted_register_base_is_reported(words, caplog):
+    """The check that replaced the offset search.
 
-    async def read(address, count=1, device_id=1):
-        stat = truth.get(device_id)
-        if stat is None:
-            raise ModbusIOException("No response received")
-        # The firmware is 0-based: wire address A holds manual register A + 1.
-        return _Response([stat.get(address + 1 + i, 0) for i in range(count)])
-
-    client.read_holding_registers = read
-    assert await hub.async_detect_offset([7]) == -1
-    assert hub.register_offset == -1
-
-
-async def test_detection_probes_an_absent_unit_once_not_at_both_offsets():
-    """A silent id is absent, not mis-addressed, so the second probe is waste.
-
-    A thermostat that is present but does not implement an address answers with
-    an exception response; only an absent one says nothing at all. Paying a
-    second timeout to ask again is what pushes a mostly-empty bus over
-    pymodbus's disconnect budget.
+    Register 31 is the id we addressed, so reading anything else means the map is
+    landing one slot away. Otherwise silent: nothing raises and every value is
+    plausible, the card just shows the wrong things.
     """
-    hub, client = make_hub(silent_units={2, 3})
-    hub.register_offset = None
-    await hub.async_detect_offset([1, 2, 3])
+    hub, bus = make_hub()
+    stat = bus.for_unit(7)
+    stat.holding.clear()
+    # A 1-based firmware: manual register N sits at wire address N, so reading
+    # at the assumed -1 shifts everything by one.
+    for register, word in words.heat(7).items():
+        stat.holding[register] = word
 
-    for unit_id in (2, 3):
-        probes = [r for r in client.reads if r[0] == unit_id]
-        assert len(probes) == 1, f"unit {unit_id} was probed {len(probes)} times"
-    # The unit that answers is still probed at both candidate offsets.
-    assert len([r for r in client.reads if r[0] == 1]) == len(OFFSETS)
+    await hub.async_read_units([7])
+    assert "communications id" in caplog.text
+
+    # Once per unit, not once per poll - a 60 s log spammer helps nobody.
+    caplog.clear()
+    await hub.async_read_units([7])
+    assert "communications id" not in caplog.text
 
 
-async def test_probing_never_leaves_the_offset_disturbed():
-    """A probe at a candidate offset must not change the hub's settled answer."""
+async def test_a_correctly_based_stat_says_nothing(words, caplog):
+    hub, bus = make_hub()
+    stat = bus.for_unit(7)
+    stat.holding.clear()
+    for register, word in words.heat(7).items():
+        stat.holding[register - 1] = word
+
+    await hub.async_read_units([7])
+    assert "communications id" not in caplog.text
+
+
+async def test_the_base_is_checked_on_the_discovery_probe_too(words, caplog):
+    """Onboarding is when a wrong base is worth hearing about.
+
+    The config flow reads through `async_probe_unit`, which covers register 31 -
+    so the scan reports the addressing problem rather than leaving it to be
+    guessed at from two thermostats that scored badly.
+    """
+    hub, bus = make_hub()
+    stat = bus.for_unit(7)
+    stat.holding.clear()
+    for register, word in words.heat(7).items():
+        stat.holding[register] = word
+
+    await hub.async_probe_unit(7)
+    assert "communications id" in caplog.text
+
+
+async def test_a_block_that_never_reaches_register_31_stays_quiet(caplog):
+    """The weekly program is registers 51-218, so there is nothing to check.
+
+    Without this the check reads `None` for a register the block never covered
+    and reports every schedule read as a mis-addressed bus.
+    """
     hub, _ = make_hub()
-    await hub.async_probe_unit(1, offset=0)
-    assert hub.register_offset == -1
+    assert await hub.async_read_span(1, 51, 168) is not None
+    assert "communications id" not in caplog.text
 
 
 async def test_connect_reports_a_bus_that_will_not_open():
-    hub, _ = make_hub(connected=False)
+    hub, _ = make_hub(dead=True)
     with pytest.raises(EdgeConnectionError, match="Could not open"):
-        await hub.async_connect([1])
+        await hub.async_connect()
 
 
 def test_a_serial_hub_needs_a_port():

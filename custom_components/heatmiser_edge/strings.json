@@ -17,13 +17,11 @@
           "bytesize": "Data bits",
           "parity": "Parity",
           "stopbits": "Stop bits",
-          "unit_ids": "Communications IDs (Modbus) to look for",
-          "register_offset": "Register addressing"
+          "unit_ids": "Communications IDs (Modbus) to look for"
         },
         "data_description": {
           "serial_port": "For example /dev/ttyUSB0, or a stable path under /dev/serial/by-id/.",
-          "unit_ids": "A list or range, such as 1-32 or 1-4,7. Each thermostat's ID is set on its own keypad, under feature 11 — Communications ID (Modbus). The factory default is 00, which disables Modbus entirely, so every thermostat needs an ID of its own between 01 and 32: two sharing one ID will clash on the bus. The default sweeps the whole range, which is thorough but slow — every ID with nothing on it costs half a second, so around 18 seconds in all. Narrow it if you know the IDs.",
-          "register_offset": "The manual numbers registers from 1 but never says whether the wire agrees. Leave this on automatic: it is worked out by checking which addressing makes a thermostat report its own ID back."
+          "unit_ids": "A list or range, such as 1-32 or 1-4,7. Each thermostat's ID is set on its own keypad, under feature 11 — Communications ID (Modbus). The factory default is 00, which disables Modbus entirely, so every thermostat needs an ID of its own between 01 and 32: two sharing one ID will clash on the bus. The default sweeps the whole range, which is thorough but slow — every ID with nothing on it costs half a second, so around 18 seconds in all. Narrow it if you know the IDs."
         }
       },
       "tcp": {
@@ -33,21 +31,18 @@
           "host": "Host",
           "port": "Port",
           "framer": "Protocol",
-          "unit_ids": "Communications IDs (Modbus) to look for",
-          "register_offset": "Register addressing"
+          "unit_ids": "Communications IDs (Modbus) to look for"
         },
         "data_description": {
           "framer": "Cheap gateways are split between real Modbus TCP and transparent RTU-over-TCP. Choosing wrong looks exactly like a dead bus, so try the other one if nothing is found.",
-          "unit_ids": "A list or range, such as 1-32 or 1-4,7. Each thermostat's ID is set on its own keypad, under feature 11 — Communications ID (Modbus). The factory default is 00, which disables Modbus entirely, so every thermostat needs an ID of its own between 01 and 32: two sharing one ID will clash on the bus. The default sweeps the whole range, which is thorough but slow — every ID with nothing on it costs half a second, so around 18 seconds in all. Narrow it if you know the IDs.",
-          "register_offset": "The manual numbers registers from 1 but never says whether the wire agrees. Leave this on automatic: it is worked out by checking which addressing makes a thermostat report its own ID back."
+          "unit_ids": "A list or range, such as 1-32 or 1-4,7. Each thermostat's ID is set on its own keypad, under feature 11 — Communications ID (Modbus). The factory default is 00, which disables Modbus entirely, so every thermostat needs an ID of its own between 01 and 32: two sharing one ID will clash on the bus. The default sweeps the whole range, which is thorough but slow — every ID with nothing on it costs half a second, so around 18 seconds in all. Narrow it if you know the IDs."
         }
       },
       "reconfigure": {
         "title": "Re-scan the bus",
         "description": "Look for thermostats again, to pick up one that has been added or drop one that has been removed. The connection settings are left as they are.",
         "data": {
-          "unit_ids": "Communications IDs (Modbus) to look for",
-          "register_offset": "Register addressing"
+          "unit_ids": "Communications IDs (Modbus) to look for"
         },
         "data_description": {
           "unit_ids": "A list or range, such as 1-32 or 1-4,7. A thermostat you have just added needs its own ID between 01 and 32, set on its keypad under feature 11 — Communications ID (Modbus). The factory default is 00, which disables Modbus entirely."
@@ -55,13 +50,13 @@
       },
       "confirm": {
         "title": "Found {count} thermostat(s)",
-        "description": "Register addressing: {offset}.\n\nThe EDGE protocol has no model register, so the type of each thermostat is worked out from what its registers look like. Thermostats needing a second look: {unsure}.",
+        "description": "The EDGE protocol has no model register, so the type of each thermostat is worked out from what its registers look like. Thermostats needing a second look: {unsure}.",
         "data": {},
         "data_description": {}
       }
     },
     "progress": {
-      "scanning": "Scanning the RS485 bus for thermostats…"
+      "scanning": "Checking unit {unit} ({position} of {total})…\n\nThermostats found so far: {found}"
     },
     "error": {
       "cannot_connect": "Could not open the bus.",
@@ -88,7 +83,7 @@
           "scan_interval": "Every thermostat is read once per interval, which takes about a fifth of a second each at 9600 baud.",
           "timeout": "How long to wait for a thermostat to answer before treating it as absent.",
           "controls": "Turn this off to make the integration read-only. Every setting, mode and setpoint control disappears; readings are unaffected.",
-          "register_offset": "Change this only if every reading looks like it belongs to the neighbouring register."
+          "register_offset": "Change this only if the log warns that a thermostat reports the wrong communications ID, or every reading looks like it belongs to the neighbouring register."
         }
       }
     }
