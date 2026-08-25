@@ -138,13 +138,17 @@ async def test_the_keylock_ships_read_only_and_disabled(hass, mock_hub):
     assert registry.async_get(entity_id).disabled_by is er.RegistryEntryDisabler.INTEGRATION
 
 
-async def test_probe_sensors_ship_disabled(hass, mock_hub):
-    """Most installs fit neither a floor nor a remote probe."""
+async def test_optional_accessories_ship_disabled(hass, mock_hub):
+    """Most installs fit no floor probe, no remote probe and no window contact.
+
+    A missing probe reads unknown, but a missing window contact reads a
+    permanent "closed" - which is indistinguishable from a real one.
+    """
     entry = await setup_entry(hass)
     registry = er.async_get(hass)
-    for register in (4, 5):
+    for platform, register in (("sensor", 4), ("sensor", 5), ("binary_sensor", 6)):
         entity_id = registry.async_get_entity_id(
-            "sensor", DOMAIN, f"{entry.entry_id}_1_{register}"
+            platform, DOMAIN, f"{entry.entry_id}_1_{register}"
         )
         assert registry.async_get(entity_id).disabled_by is not None
 

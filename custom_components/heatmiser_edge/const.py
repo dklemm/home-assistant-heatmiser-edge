@@ -472,11 +472,13 @@ ENUMS: dict[str, dict[int, dict[int, str]]] = {
     },
 }
 
-# Read-only registers that ship disabled: bookkeeping, or a probe most installs
-# do not fit (an unconnected floor sensor reads 0, which decode.py turns into
-# unknown rather than a fictional 0.0 degC).
+# Read-only registers that ship disabled: bookkeeping, or an accessory most
+# installs do not fit - the floor and remote probes (an unconnected one reads 0,
+# which decode.py turns into unknown rather than a fictional 0.0 degC) and the
+# window contact at 6, which is a separate part and reads a permanent "closed"
+# without one.
 DISABLED_BY_DEFAULT: dict[str, frozenset[int]] = {
-    MODEL_HEAT: frozenset({4, 5, 12, 13, 15, 16, 21, 31, 39, 40, 41, 42}),
+    MODEL_HEAT: frozenset({4, 5, 6, 12, 13, 15, 16, 21, 31, 39, 40, 41, 42}),
     MODEL_TIMER: frozenset({6, 31, 39, 40, 41}),
 }
 
