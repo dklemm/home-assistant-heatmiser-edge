@@ -5,6 +5,7 @@ config entry or Home Assistant, and a mistranscribed address is exactly the kind
 of bug that otherwise surfaces as a mysterious wrong reading months later.
 """
 
+from custom_components.heatmiser_edge import const
 from custom_components.heatmiser_edge.const import (
     BINARY,
     DIAGNOSTIC,
@@ -76,6 +77,34 @@ def test_every_curated_register_exists_in_its_model():
                 )
         for number in DISABLED_BY_DEFAULT[model] | DIAGNOSTIC[model]:
             assert reg(model, number) is not None
+
+
+# 46 (factory reset) and 47-50 (the RTC) are named so the tables can suppress
+# them, and are deliberately absent from the map: neither is ever an entity.
+_NAMED_BUT_NOT_IN_THE_MAP = frozenset({"REG_FACTORY_RESET", "REG_RTC"})
+
+
+def test_every_named_register_means_what_its_name_says():
+    """The curated tables in const.py are read through the REG_* names, so a
+    name that has drifted from the map is a silent lie.
+
+    The five numbers where the two variants disagree are where that would
+    happen: a Heat name in a Timer table would read plausibly and collect the
+    wrong register. `REG_TIMER_*` marks those; everything else is the Heat map,
+    which is also the shared meaning wherever both agree.
+    """
+    for name in (n for n in dir(const) if n.startswith("REG_")):
+        if name in _NAMED_BUT_NOT_IN_THE_MAP:
+            continue
+        number = getattr(const, name)
+        model = MODEL_TIMER if name.startswith("REG_TIMER_") else MODEL_HEAT
+        entry = reg(model, number)
+        assert entry is not None, f"{name} is {number}, not in the {model} map"
+        expected = name.removeprefix("REG_TIMER_").removeprefix("REG_").lower()
+        assert entry.key.replace("temperature", "temp") == expected, (
+            f"{name} is register {number}, which the {model} map calls "
+            f"{entry.key!r}"
+        )
 
 
 def test_no_register_is_claimed_by_two_platform_tables():
