@@ -56,7 +56,7 @@
       }
     },
     "progress": {
-      "scanning": "Checking unit {unit} ({position} of {total})…\n\nThermostats found so far: {found}"
+      "scanning": "Checking unit {unit}… {found} found so far"
     },
     "error": {
       "cannot_connect": "Could not open the bus.",

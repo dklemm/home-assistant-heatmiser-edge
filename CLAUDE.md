@@ -162,7 +162,7 @@ The result is always a **default the user confirms** in the config flow, never a
 ## The config-flow sweep reports itself, one id at a time
 
 A 1-32 sweep is ~18 s even when nothing answers, so the scan runs behind a progress dialog that
-names **the id being probed and the thermostats found so far**.
+names **the id being probed and how many thermostats have answered**.
 
 **That shape is forced by Home Assistant, not chosen.** A progress dialog's text is fixed for as
 long as its `progress_task` runs — `async_update_progress()` moves the *bar* but never re-renders
@@ -187,9 +187,19 @@ the value again. The dialog then flips between two differently-sized widgets on 
 is worse than the original stutter: the spinner stops animating, the ring pops in at a different
 size, and everything below it shifts. Shipped and reported. The count lives in the text instead.
 
-**Nothing in the dialog may change size mid-sweep**, for the same reason. `_found_summary` caps the
-id list at `_MAX_FOUND_SHOWN` and appends "and N more", so the line cannot wrap even on a full bus.
-Gated by `tests/test_config_flow.py::test_the_found_list_cannot_grow_the_dialog`.
+**Nothing in the dialog may change size mid-sweep**, for the same reason. The text is one line
+carrying the id and a *count* — it used to list the ids found, which needed a cap and an "and N more"
+tail to stop the line wrapping on a full bus. A count cannot grow, so that whole guard is gone.
+
+**The confirm step gives each thermostat a `section`, and that is not cosmetic.** Its fields are
+built per unit id, so `name_1` and `model_1` have nothing static for `strings.json` to name and Home
+Assistant falls back to rendering the raw key as the label — shipped and reported. Enumerating
+`name_1`…`name_32` in two files would fix the text and not the layout: `ha-form` leaves a wider gap
+after a text field than after a dropdown, so each model reads as belonging to the *next*
+thermostat's name. One `section` per unit fixes both at once and costs no strings — the header and
+the inner `name`/`model` labels are still key fallbacks, but they are now readable ones. `strings.json`
+cannot help here at all: a section's translations live under `sections.<key>.…`, and the key is just
+as dynamic. The options flow lists the same two fields per unit and shares `_unit_section`.
 
 - `EdgeConfigFlow` owns the hub across the sweep (`_scan_hub`), because opening and closing a serial
   port 32 times is not the same as opening it once. `async_remove` closes it if the user abandons

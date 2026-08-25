@@ -5,8 +5,8 @@
 The scan is the interesting step. Sweeping unit ids at 9600 baud costs a full
 timeout for every id that isn't there, so three things keep it bearable: the
 probe reads five registers rather than fifty, it runs behind a real progress
-dialog instead of a frozen form, and that dialog names the id it is on and the
-thermostats found so far. That is what lets the default be the whole 1-32 range
+dialog instead of a frozen form, and that dialog says which id it is on and how
+many thermostats it has found. That is what lets the default be the whole 1-32 range
 - one field, asked once, and nobody has to know their thermostats' ids to get
 started. A user who does know can narrow it and save the wait.
 
@@ -32,6 +32,7 @@ from homeassistant.config_entries import (
 )
 from homeassistant.const import CONF_HOST, CONF_PORT, CONF_SCAN_INTERVAL
 from homeassistant.core import callback
+from homeassistant.data_entry_flow import section
 from homeassistant.helpers.selector import (
     BooleanSelector,
     NumberSelector,
@@ -113,6 +114,29 @@ _FRAMER_OPTIONS = [
 ]
 
 
+def _unit_section(name: str, model: str) -> section:
+    """One thermostat's name and model, as a block of its own.
+
+    A section per unit rather than `name_1`/`model_1` flat in one schema, for
+    two reasons. The keys are built per unit id, so there is nothing static for
+    `strings.json` to name and Home Assistant falls back to showing them raw.
+    And `ha-form` leaves a wider gap after a text field than after a dropdown,
+    which reads as each model belonging to the *next* thermostat's name.
+    """
+    return section(
+        vol.Schema(
+            {
+                vol.Required("name", default=name): TextSelector(),
+                vol.Required(CONF_MODEL, default=model): SelectSelector(
+                    SelectSelectorConfig(
+                        options=_MODEL_OPTIONS, mode=SelectSelectorMode.DROPDOWN
+                    )
+                ),
+            }
+        )
+    )
+
+
 def _common_schema(defaults: dict[str, Any]) -> dict:
     """The field both transports share: which unit ids to sweep.
 
@@ -190,20 +214,6 @@ def build_scan_hub(data: dict[str, Any]) -> EdgeHub:
         timeout=SCAN_TIMEOUT,
         register_offset=int(data.get(CONF_REGISTER_OFFSET, DEFAULT_REGISTER_OFFSET)),
     )
-
-
-# Enough ids to be useful, few enough that the line cannot wrap and shift the
-# dialog's layout part way through a sweep.
-_MAX_FOUND_SHOWN = 8
-
-
-def _found_summary(found: list[DiscoveredUnit]) -> str:
-    """What the sweep has turned up so far, for the progress dialog."""
-    if not found:
-        return "none yet"
-    shown = ", ".join(str(f.unit_id) for f in found[:_MAX_FOUND_SHOWN])
-    extra = len(found) - _MAX_FOUND_SHOWN
-    return f"{shown} and {extra} more" if extra > 0 else shown
 
 
 class EdgeConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -290,7 +300,8 @@ class EdgeConfigFlow(ConfigFlow, domain=DOMAIN):
         value switches `ha-circular-progress` from its indeterminate spinner to a
         determinate ring, and a re-render drops the value again - so a percentage
         makes the dialog flip between two differently-sized widgets on every
-        batch, which jumps far worse than it informs. The count is in the text.
+        batch, which jumps far worse than it informs. The spinner stays a
+        spinner, and the text carries the id and the count.
         """
         if self._scan_task is not None and self._scan_task.done():
             self._scan_task = None
@@ -310,9 +321,7 @@ class EdgeConfigFlow(ConfigFlow, domain=DOMAIN):
                 progress_task=self._scan_task,
                 description_placeholders={
                     "unit": str(self._unit_ids[self._scan_index]),
-                    "position": str(self._scan_index + 1),
-                    "total": str(len(self._unit_ids)),
-                    "found": _found_summary(self._found),
+                    "found": str(len(self._found)),
                 },
             )
 
@@ -378,8 +387,7 @@ class EdgeConfigFlow(ConfigFlow, domain=DOMAIN):
             units = [
                 {
                     CONF_UNIT_ID: found.unit_id,
-                    CONF_MODEL: user_input[f"model_{found.unit_id}"],
-                    "name": user_input[f"name_{found.unit_id}"],
+                    **user_input[f"unit_{found.unit_id}"],
                 }
                 for found in self._found
             ]
@@ -407,21 +415,9 @@ class EdgeConfigFlow(ConfigFlow, domain=DOMAIN):
         fields: dict[Any, Any] = {}
         for found in self._found:
             existing = known.get(found.unit_id, {})
-            fields[
-                vol.Required(
-                    f"name_{found.unit_id}",
-                    default=existing.get("name") or found.default_name,
-                )
-            ] = TextSelector()
-            fields[
-                vol.Required(
-                    f"model_{found.unit_id}",
-                    default=existing.get(CONF_MODEL) or found.guess.model,
-                )
-            ] = SelectSelector(
-                SelectSelectorConfig(
-                    options=_MODEL_OPTIONS, mode=SelectSelectorMode.DROPDOWN
-                )
+            fields[vol.Required(f"unit_{found.unit_id}")] = _unit_section(
+                existing.get("name") or found.default_name,
+                existing.get(CONF_MODEL) or found.guess.model,
             )
         unsure = [f.unit_id for f in self._found if not f.guess.confident]
         return self.async_show_form(
@@ -518,8 +514,7 @@ class EdgeOptionsFlow(OptionsFlow):
             units = [
                 {
                     CONF_UNIT_ID: unit[CONF_UNIT_ID],
-                    CONF_MODEL: user_input[f"model_{unit[CONF_UNIT_ID]}"],
-                    "name": user_input[f"name_{unit[CONF_UNIT_ID]}"],
+                    **user_input[f"unit_{unit[CONF_UNIT_ID]}"],
                 }
                 for unit in current(CONF_UNITS, [])
             ]
@@ -570,15 +565,7 @@ class EdgeOptionsFlow(OptionsFlow):
             ),
         }
         for unit in current(CONF_UNITS, []):
-            unit_id = unit[CONF_UNIT_ID]
-            fields[
-                vol.Required(f"name_{unit_id}", default=unit.get("name", ""))
-            ] = TextSelector()
-            fields[
-                vol.Required(f"model_{unit_id}", default=unit[CONF_MODEL])
-            ] = SelectSelector(
-                SelectSelectorConfig(
-                    options=_MODEL_OPTIONS, mode=SelectSelectorMode.DROPDOWN
-                )
+            fields[vol.Required(f"unit_{unit[CONF_UNIT_ID]}")] = _unit_section(
+                unit.get("name", ""), unit[CONF_MODEL]
             )
         return self.async_show_form(step_id="init", data_schema=vol.Schema(fields))

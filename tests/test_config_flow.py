@@ -29,7 +29,6 @@ from custom_components.heatmiser_edge.const import (
     CONF_UNIT_IDS,
     CONF_UNITS,
     DEFAULT_REGISTER_OFFSET,
-    MAX_UNIT_ID,
     DOMAIN,
     FRAMER_SOCKET,
     MODEL_HEAT,
@@ -71,6 +70,14 @@ def discovered(words_builder, *specs):
         )
         found.append(DiscoveredUnit(unit_id, guess_model(words), words))
     return found
+
+
+def naming(*specs):
+    """Each thermostat's name and model, as the form's sections submit them."""
+    return {
+        f"unit_{unit_id}": {"name": name, CONF_MODEL: model}
+        for unit_id, name, model in specs
+    }
 
 
 def patch_bus(found, *, probed=None, connect_error=None):
@@ -149,7 +156,7 @@ async def test_tcp_flow_creates_an_entry(hass, words, mock_hub):
 
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"],
-        {"name_1": "Hall", "model_1": MODEL_HEAT, "name_2": "HW", "model_2": MODEL_TIMER},
+        naming((1, "Hall", MODEL_HEAT), (2, "HW", MODEL_TIMER)),
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"][CONF_TRANSPORT] == TRANSPORT_TCP
@@ -166,7 +173,7 @@ async def test_serial_flow_creates_an_entry(hass, words, mock_hub):
     found = discovered(words, (1, MODEL_HEAT))
     result = await run_scan(hass, result, found)
     result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], {"name_1": "Hall", "model_1": MODEL_HEAT}
+        result["flow_id"], naming((1, "Hall", MODEL_HEAT))
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"][CONF_SERIAL_PORT] == "/dev/ttyUSB0"
@@ -178,10 +185,10 @@ async def test_the_model_guess_is_only_a_default(hass, words, mock_hub):
     result = await start(hass, TRANSPORT_TCP, TCP_INPUT)
     found = discovered(words, (1, MODEL_HEAT))
     result = await run_scan(hass, result, found)
-    assert result["data_schema"]({"name_1": "Hall"})["model_1"] == MODEL_HEAT
+    assert result["data_schema"]({"unit_1": {}})["unit_1"][CONF_MODEL] == MODEL_HEAT
 
     result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], {"name_1": "Hall", "model_1": MODEL_TIMER}
+        result["flow_id"], naming((1, "Hall", MODEL_TIMER))
     )
     assert result["data"][CONF_UNITS][0][CONF_MODEL] == MODEL_TIMER
 
@@ -267,29 +274,9 @@ async def test_the_progress_dialog_names_the_unit_and_the_running_total(hass, wo
         result = await drive_scan(hass, result)
 
     assert [p["unit"] for p in seen] == ["1", "2", "3", "4"]
-    assert [p["position"] for p in seen] == ["1", "2", "3", "4"]
-    assert all(p["total"] == "4" for p in seen)
-    # Unit 2 answers, so it is named from the step that follows its probe.
-    assert [p["found"] for p in seen] == ["none yet", "none yet", "2", "2"]
+    # Unit 2 answers, so the count moves from the step that follows its probe.
+    assert [p["found"] for p in seen] == ["0", "0", "1", "1"]
     assert result["step_id"] == "confirm"
-
-
-def test_the_found_list_cannot_grow_the_dialog():
-    """A line that wraps part way through a sweep shifts everything below it."""
-    from custom_components.heatmiser_edge.config_flow import (
-        _MAX_FOUND_SHOWN,
-        DiscoveredUnit,
-        _found_summary,
-    )
-
-    def summary(count):
-        return _found_summary([DiscoveredUnit(i, None, {}) for i in range(1, count + 1)])
-
-    assert summary(0) == "none yet"
-    assert summary(3) == "1, 2, 3"
-    assert summary(_MAX_FOUND_SHOWN + 4).endswith(" and 4 more")
-    # 32 stats is the most a bus can hold, and it still fits on one line.
-    assert len(summary(MAX_UNIT_ID)) < 60
 
 
 async def test_the_dialog_is_paced_by_a_clock_not_by_unit_ids(hass, words):
@@ -301,7 +288,7 @@ async def test_the_dialog_is_paced_by_a_clock_not_by_unit_ids(hass, words):
     real = config_flow.EdgeConfigFlow.async_show_progress
 
     def spy(self, **kwargs):
-        renders.append(kwargs["description_placeholders"]["position"])
+        renders.append(kwargs["description_placeholders"]["unit"])
         return real(self, **kwargs)
 
     result = await start(hass, TRANSPORT_TCP, {**TCP_INPUT, CONF_UNIT_IDS: "1-32"})
@@ -379,12 +366,11 @@ async def test_options_round_trip(hass, mock_hub):
             CONF_TIMEOUT: 2.0,
             CONF_CONTROLS: False,
             CONF_REGISTER_OFFSET: "0",
-            "name_1": "Hallway",
-            "model_1": MODEL_HEAT,
-            "name_2": "Hot water",
-            "model_2": MODEL_TIMER,
-            "name_3": "Study",
-            "model_3": MODEL_HEAT,
+            **naming(
+                (1, "Hallway", MODEL_HEAT),
+                (2, "Hot water", MODEL_TIMER),
+                (3, "Study", MODEL_HEAT),
+            ),
         },
     )
     await hass.async_block_till_done()
@@ -452,20 +438,17 @@ async def test_reconfigure_rescans_and_keeps_existing_names(hass, mock_hub, word
     assert result["step_id"] == "confirm"
     # Unit 1 keeps "Hall" from the original setup; unit 4 is new, so it falls
     # back to the guess.
-    defaults = result["data_schema"]({})
-    assert defaults["name_1"] == "Hall"
-    assert defaults["name_4"] == "EDGE Heat 4"
+    defaults = result["data_schema"]({"unit_1": {}, "unit_2": {}, "unit_4": {}})
+    assert defaults["unit_1"]["name"] == "Hall"
+    assert defaults["unit_4"]["name"] == "EDGE Heat 4"
 
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"],
-        {
-            "name_1": "Hall",
-            "model_1": MODEL_HEAT,
-            "name_2": "Hot water",
-            "model_2": MODEL_TIMER,
-            "name_4": "Landing",
-            "model_4": MODEL_HEAT,
-        },
+        naming(
+            (1, "Hall", MODEL_HEAT),
+            (2, "Hot water", MODEL_TIMER),
+            (4, "Landing", MODEL_HEAT),
+        ),
     )
     await hass.async_block_till_done()
     assert result["type"] is FlowResultType.ABORT
@@ -493,7 +476,7 @@ async def test_a_legacy_scan_all_entry_still_offers_the_whole_range(
     )
     result = await run_scan(hass, result, discovered(words, (1, MODEL_HEAT)))
     result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], {"name_1": "Hall", "model_1": MODEL_HEAT}
+        result["flow_id"], naming((1, "Hall", MODEL_HEAT))
     )
     await hass.async_block_till_done()
     assert result["reason"] == "reconfigure_successful"
