@@ -538,9 +538,14 @@ permanently) and pytest on 3.14. No ruff, no mypy.
 
 `strings.json` is authored and **copied byte-for-byte** to `translations/en.json`; a test gates that.
 
-No brand icon ships yet. home-assistant/brands no longer accepts custom integrations, so the CI
-HACS check ignores `brands` permanently; when there is an icon it goes in
-`custom_components/heatmiser_edge/brand/` as `icon.svg`, `icon.png` (256px) and `icon@2x.png` (512px).
+A brand icon already ships, but from `home-assistant/brands`, not from this repo:
+`custom_integrations/heatmiser_edge` there (added by
+[PR #7777](https://github.com/home-assistant/brands/pull/7777)) carries the identical icon/logo
+files as `core_integrations/heatmiser` — same bytes, deliberately reusing the manufacturer's mark
+for the sibling protocol. Custom-integration folders in that repo cannot symlink to a core one (only
+core-to-core symlinks are allowed), so the files are duplicated rather than shared by reference, but
+the two show the same flame logo in the integrations list as a result. Confirmed 2026-08-26; the CI
+HACS check's `ignore: brands` was removed the same day since the domain does have a valid entry.
 
 ## Still open, to settle on hardware
 

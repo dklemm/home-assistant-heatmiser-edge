@@ -23,11 +23,6 @@ jobs:
       - uses: hacs/action@main
         with:
           category: integration
-          # home-assistant/brands no longer accepts custom integrations (a bot
-          # auto-closes those PRs); since HA 2026.3.0 the icon ships in
-          # custom_components/heatmiser_edge/brand/ instead. So this check can
-          # never pass and stays ignored permanently. Everything else must pass.
-          ignore: brands
 
   tests:
     name: Tests
