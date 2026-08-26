@@ -13,10 +13,11 @@ Heatmiser EDGE thermostats over RS485 Modbus RTU, plus its dev tooling in `dev/`
 | `custom_components/heatmiser_edge/registers.py` | the register map, hand-transcribed from the manual |
 | `custom_components/heatmiser_edge/const.py` | protocol constants **and** the curated ship-list tables |
 | `custom_components/heatmiser_edge/decode.py` | pure words↔values: temperatures, packed bytes, plausibility |
-| `custom_components/heatmiser_edge/detect.py` | pure scoring: register base, and Heat vs Timer |
-| `custom_components/heatmiser_edge/hub.py` | all Modbus I/O: one lock, the 50 ms gap, the offset, per-unit backoff |
+| `custom_components/heatmiser_edge/detect.py` | pure scoring: Heat vs Timer |
+| `custom_components/heatmiser_edge/hub.py` | all Modbus I/O, over `modbus-connection`: the offset, the one retry, per-unit backoff |
 | `custom_components/heatmiser_edge/coordinator.py` | the poll, per-unit data, the one `platform_for()` gate |
 | `custom_components/heatmiser_edge/schedule.py` | pure grid↔words: the weekly program, and what may be written into it |
+| `custom_components/heatmiser_edge/config_flow.py` | onboarding, and the per-id progress sweep |
 | `custom_components/heatmiser_edge/services.py` | the writes with no entity: `set_time`, `set_hold`, `get_schedule`, `set_schedule` |
 | `dev/fake_edge_server.py` | a fake bus on 127.0.0.1:5020 — three units, both register bases |
 | `dev/edge_modbus_test.py` | field CLI: `detect`, `scan`, `dump`, `schedule`, `read`, `poll`, `write`, `settime` |
@@ -33,16 +34,34 @@ the data.
 
 ## Two things the manual does not say, and how they are settled
 
-**Is the wire 0-based?** The manual numbers from 1 and never says. Register 31 settles it: it holds
-the Communications ID, which is by definition the id we addressed the request to, so the offset that
-makes it read back correctly is the right one. That is self-verifying, not a guess.
+**Is the wire 0-based?** The manual numbers from 1 and never says. **Settled: it is** — manual N at
+wire N−1, the standard Modbus convention, confirmed on hardware across the whole 1–218 range. That
+is now `const.DEFAULT_REGISTER_OFFSET`, and there is **no search**. The integration used to probe
+both bases and vote across units at onboarding; that was ~236 lines answering a question with one
+answer, and it was deleted 2026-08-17.
 
-It is *not* decidable from register 31 alone on unit 1 — at the wrong offset that slot holds
-register 32, the on/off flag, which also reads 1. The mode and on/off registers corroborate, and
-usually decide it, because at the wrong offset the "mode" slot holds the override setpoint (210 for
-a stat set to 21.0 °C), which is not a mode. It stays genuinely ambiguous only on a factory-fresh
-unit 1 whose override has never been written — so every responding unit votes, and **any unit with
-id ≥ 6 is decisive**, because nothing else in the 30–34 window can hold a value above 5.
+What replaced it is `EdgeHub._check_register_base`, about ten lines: register 31 holds the
+Communications ID, which is by definition the id we addressed, so if it reads back as anything else
+the whole map is landing one slot away. It warns once per unit. That keeps the only thing the search
+was really worth — the failure mode is otherwise **silent and plausible**, with room temperature
+showing the floor probe and the mode select showing a setpoint, and nothing raising.
+
+It hangs off `async_read_block`, not the poll, so it covers **every** read whose block reaches
+register 31 — the poll, the config-flow scan and its discovery probe. Onboarding is when a wrong base
+is most worth hearing about, and it is the one moment the user can still act on it. Blocks that never
+reach 31 (a schedule read is 51–218) are skipped explicitly: without that guard `words.get(31)` is
+`None`, `None != unit_id`, and every schedule read reports a mis-addressed bus.
+
+The base stays a config option (−1 or 0, defaulting to −1), so a stat that ever disagreed is fixed
+without a release — but **setup never asks for it**. A first-time user has no way to answer, and the
+check reports it when it is wrong, so it lives only in the *options* flow, which is where someone
+acts on that warning. It is therefore in `entry.options` and not `entry.data`, which is why
+`async_step_reconfigure` seeds it with `option()` before a re-scan; gated by
+`tests/test_config_flow.py::test_a_rescan_honours_an_offset_set_in_options`.
+
+`dev/edge_modbus_test.py detect` prints register 31 at both bases when that happens — **any unit
+with id ≥ 6 is decisive**, because nothing else in the 30–34 window can hold a
+value above 5, while on unit 1 both bases can read 1.
 
 **Heat or Timer?** There is no model or product-id register — only "Code version number" at
 register 1, which does not distinguish them. `detect.guess_model` scores the two: a Heat stores a
@@ -59,27 +78,40 @@ The result is always a **default the user confirms** in the config flow, never a
   120, so °C-only bands score an ordinary °F stat at 3 and call it unidentifiable. Caught by
   `dev/fake_edge_server.py --fahrenheit 1`, gated by
   `tests/test_detect.py::test_a_fahrenheit_stat_is_still_recognised`.
-- **pymodbus 3.13+**: the kwarg is `device_id=`, and `retries=1` (the default 3 triples the cost of
-  every silent unit). `ConnectionException` means the transport is down; `ModbusIOException` means
-  one unit did not answer. Conflating them takes the whole bus offline for one dead thermostat.
-- **Six consecutive silent reads make pymodbus close the connection**, and `retries=1` is what sets
-  the number. `transaction.py` keeps `count_until_disconnect`, budgeted at `retries + 3` and reset
-  by *any* success; when it goes negative it calls `connection_lost()` and raises. So `retries=1`
-  buys cheap timeouts at the cost of the shortest possible disconnect budget — 6 silences instead
-  of the default's 8. Confirmed on hardware 2026-08-12: before the fix, `scan --ids 1-3` (4 silent
-  probes) worked and `--ids 1-4` (6) killed the client and aborted the whole scan with "Bus error"
-  — which broke the *default* config-flow range (1-8 then, 1-32 now) on any bus that is not fully
-  populated. The wider default leans on this fix harder: a typical bus is mostly silent ids.
-  **`EdgeHub._transact` now absorbs this**: a `ConnectionException` buys one reconnect and one
-  retry, so an absent id stays a device fact. A genuinely dead port still raises on the second
-  attempt. `_async_reconnect` closes before it opens, because pyserial holds an exclusive lock on
-  the device and reconnecting without closing fails with EAGAIN. `async_detect_offset` also stops
-  probing a unit's second offset once it is silent at the first — a stat that is present but does
-  not implement an address answers with an exception response, not silence, so the second probe
-  only ever bought a second timeout.
-- **Do not build the pymodbus client in `EdgeHub.__init__`.** Constructing one allocates a socket,
-  so a hub the config flow builds for a probe and abandons leaks it. `_make_client()` runs on
-  connect.
+- **The transport is `modbus-connection`, not raw pymodbus** — Home Assistant's backend-neutral
+  abstraction, on its pymodbus backend (`modbus_connection.pymodbus.ModbusConnection`). It owns the
+  client, the serialising lock, the inter-transaction gap and the reconnect; `hub.py` owns register
+  numbering, per-unit availability and the one retry below. Pin it tightly:
+  `modbus-connection[pymodbus]>=4.8.1,<5`, and note the **`[pymodbus]` extra is required** — the
+  top-level package is a pure interface and installs no Modbus library at all. Nothing in
+  `custom_components/` imports pymodbus any more; `dev/fake_edge_server.py` still does, because the
+  library has no server side.
+- **The exception split is now typed, and the catch order is load-bearing.**
+  `ModbusConnectionError` means the transport is down; `ModbusTimeoutError` means one unit did not
+  answer; `ModbusExceptionError` (and its per-code subclasses) means the unit answered with a Modbus
+  exception response. **All three subclass `ModbusError`**, so `async_read_block` must catch
+  `ModbusConnectionError` *first* — reversing them takes the whole bus offline for one dead
+  thermostat. The last two both mean "no words from this stat" and become `None`, which is exactly
+  what the old `ModbusIOException` / `result.isError()` pair did.
+- **A run of silent ids still drops the link, and `EdgeHub._transact`'s one retry is what absorbs
+  it.** pymodbus counts *consecutive* silences in `transaction.py`'s `count_until_disconnect`,
+  budgeted at `retries + 3` and reset by *any* success; when it goes negative it calls
+  `connection_lost()` **and raises**. The library sets `retries=0` (we used to set 1), so the budget
+  is now 3 silences rather than 6 — but each silent id costs one timeout instead of two, which on a
+  mostly-empty bus is the better trade. Confirmed on hardware 2026-08-12 with the old numbers:
+  `scan --ids 1-3` (4 silent probes) worked and `--ids 1-4` (6) killed the client and aborted the
+  whole scan with "Bus error" — which broke the *default* config-flow range on any bus that is not
+  fully populated. So `_transact` catches `ModbusConnectionError`, calls `connection.disconnect()`
+  and retries exactly once; the library reconnects on the retry's own request. **Use `disconnect()`,
+  never `close()`** — `close()` is permanent, and `disconnect()` is close-before-open, which is what
+  pyserial's exclusive lock on the device requires. A genuinely dead port raises again on the second
+  attempt and is reported as the bus failure it is. Unlike the old hand-rolled version the retry is
+  a *second paced request*, so another unit can slot in between the two attempts — harmless, because
+  every read is idempotent and every write is one FC06 of one register.
+- **`EdgeHub.__init__` builds the connection, and that is now correct.** The old rule was the
+  opposite — constructing a pymodbus client allocates a socket, so a hub the config flow builds for
+  a probe and abandons leaked one. `BaseModbusConnection.__init__` allocates nothing; its
+  `_connect_client` runs on connect. Do not reintroduce the deferral.
 - **`ModbusDeviceContext`/`ModbusSequentialDataBlock` are deprecated in pymodbus 3.14** and carry a
   legacy address+1 lookup. `dev/fake_edge_server.py` uses `SimData`/`SimDevice` instead, where wire
   address 0 is `SimData(0, ...)` with no arithmetic at all.
@@ -96,24 +128,93 @@ The result is always a **default the user confirms** in the config flow, never a
 
 ## The bus is the constraint
 
-- **Half-duplex and shared.** One `asyncio.Lock` covers every transaction on every unit id, reads
-  and writes alike.
-- **The manual demands >50 ms between transactions.** Slept inside the lock, and only for the time
-  actually remaining since the last one ended — a flat sleep would tax every poll. `_next_free` is
-  set in a `finally`, so a *timed-out* unit still paces what follows; a stat that answers late must
+- **Half-duplex and shared.** One lock covers every transaction on every unit id, reads and writes
+  alike. It is the library's: `Pacer.paced()` holds it across the whole request.
+- **The manual demands >50 ms between transactions.** Passed to the connection as
+  `message_spacing=INTER_TRANSACTION_GAP` and slept inside that same lock, for only the time
+  actually remaining since the last one *ended* — a flat sleep would tax every poll, and measuring
+  from the end means a *timed-out* unit still paces what follows, so a stat that answers late does
   not step on the next one's reply.
+- **`Pacer` takes no lock at all when the spacing is zero**, so the half-duplex guarantee above is a
+  *consequence* of setting a non-zero gap, not a separate mechanism. Setting
+  `INTER_TRANSACTION_GAP` to 0 would quietly put two requests on the wire at once. Gated by
+  `tests/test_hub.py::test_the_gap_is_what_serialises_the_bus`.
 - **60 registers per packet**, so the poll of registers 1–50 is exactly one FC03 per thermostat.
   There is no batching, bisection or dead-address cache here (unlike CTC): both variants implement
   1–50 contiguously, so a register never goes silent on its own. Only a whole unit does. The one
   thing that does not fit a packet is the weekly program — `EdgeHub.async_read_span` splits it, and
   it is never polled.
 - **Entity writes are FC06.** The manual permits 06 and 16; every control writes exactly one
-  register, and FC06's response echoes the address *and the value*, so a silently-clamping stat
-  tells us what it kept. `async_write_registers` (FC16) exists for the blocks that must move
+  register, which is one complete value, so there is nothing to tear.
+  `async_write_registers` (FC16) exists for the blocks that must move
   atomically: the RTC (47–50) and one schedule period use it today, the away deadline (39–41) is
-  still to come. **FC16 echoes only the address and the quantity, never the values**, so it cannot
-  reveal a clamp on its own — its callers verify by reading back. `tests/test_entities.py::test_writes_use_the_single_register_function` keeps an entity
-  from quietly acquiring a block write.
+  still to come. `tests/test_entities.py::test_writes_use_the_single_register_function` keeps an
+  entity from quietly acquiring a block write.
+- **The FC06 echo is no longer reachable, and nothing relied on it.** FC06's response does echo the
+  value the stat kept — that is how the silently-refused writes below were found on hardware — but
+  `ModbusUnit.write_register` returns `None` and discards it. The shipped guard against those
+  refusals was never the echo: it is `EdgeCoordinator.allowed_operation_modes` declining to issue
+  the write at all. If echo verification is ever wanted, it costs a follow-up
+  `read_holding_registers` of the same register — which works, because the *written* register takes
+  the value immediately (measured: register 34 at +80 ms), unlike register 7. FC16 never echoed
+  values in the first place, so its callers always verified by reading back.
+
+## The config-flow sweep reports itself, one id at a time
+
+A 1-32 sweep is ~18 s even when nothing answers, so the scan runs behind a progress dialog that
+names **the id being probed and how many thermostats have answered**.
+
+**That shape is forced by Home Assistant, not chosen.** A progress dialog's text is fixed for as
+long as its `progress_task` runs — `async_update_progress()` moves the *bar* but never re-renders
+the description. The frontend only sees new `description_placeholders` when the flow re-enters the
+step, which happens when a `progress_task` completes (`FlowManager._async_handle_step` registers a
+done-callback that re-configures the flow). So live text needs the sweep split across several
+tasks; do not "simplify" it back into one.
+
+**But a task per unit id is visibly jerky, and that was shipped and reported.** Unit ids are not
+evenly timed — a stat that answers costs ~150 ms, an absent one pays a full `SCAN_TIMEOUT` — so the
+dialog re-rendered at 0.31 s, then 0.50, then 0.31, and the spinner stuttered on every one. A task
+is therefore **a second's worth of ids** (`SCAN_PROGRESS_INTERVAL`), however many that turns out to
+be. Measured over 12 ids with 2 present: 12 re-renders at gaps
+`0.31, 0.50, 0.51, 0.50, 0.50, 0.50, 0.31, …` became 5 at `1.31, 1.01, 1.31, 1.01`. A batch cannot
+stop mid-probe, so it overshoots by whatever the current id costs; that residual unevenness is
+inherent.
+
+**There is deliberately no percentage.** `async_update_progress` looks free — it fires an event
+rather than re-rendering — but setting a progress value switches the frontend's
+`ha-circular-progress` from its indeterminate spinner to a determinate ring, and a re-render drops
+the value again. The dialog then flips between two differently-sized widgets on every batch, which
+is worse than the original stutter: the spinner stops animating, the ring pops in at a different
+size, and everything below it shifts. Shipped and reported. The count lives in the text instead.
+
+**Nothing in the dialog may change size mid-sweep**, for the same reason. The text is one line
+carrying the id and a *count* — it used to list the ids found, which needed a cap and an "and N more"
+tail to stop the line wrapping on a full bus. A count cannot grow, so that whole guard is gone.
+
+**The confirm step gives each thermostat a `section`, and that is not cosmetic.** Its fields are
+built per unit id, so `name_1` and `model_1` have nothing static for `strings.json` to name and Home
+Assistant falls back to rendering the raw key as the label — shipped and reported. Enumerating
+`name_1`…`name_32` in two files would fix the text and not the layout: `ha-form` leaves a wider gap
+after a text field than after a dropdown, so each model reads as belonging to the *next*
+thermostat's name. One `section` per unit fixes both at once and costs no strings — the header and
+the inner `name`/`model` labels are still key fallbacks, but they are now readable ones. `strings.json`
+cannot help here at all: a section's translations live under `sections.<key>.…`, and the key is just
+as dynamic. The options flow lists the same two fields per unit and shares `_unit_section`.
+
+- `EdgeConfigFlow` owns the hub across the sweep (`_scan_hub`), because opening and closing a serial
+  port 32 times is not the same as opening it once. `async_remove` closes it if the user abandons
+  the flow mid-sweep.
+- An `EdgeConnectionError` from any probe stops the sweep dead rather than paying 31 more timeouts
+  for a bus that is not there. Gated by
+  `tests/test_config_flow.py::test_a_bus_that_will_not_open_aborts`, which asserts nothing was probed.
+- There is no `async_scan_bus` any more; the flow *is* the sweep. So the flow tests patch `EdgeHub`
+  and drive the real thing — `patch_bus()` in `tests/test_config_flow.py`. Two traps there:
+  HA advances the flow itself via that done-callback, so a test cannot observe the intermediate
+  renders by stepping `async_configure` (`hass.async_block_till_done()` runs the whole sweep) —
+  spy on `async_show_progress` instead. And the mock answers instantly, so a whole 32-id sweep fits
+  in one batch: a test wanting per-id renders patches `SCAN_PROGRESS_INTERVAL` to 0. Both are gated,
+  by `::test_the_progress_dialog_names_the_unit_and_the_running_total` and
+  `::test_the_dialog_is_paced_by_a_clock_not_by_unit_ids`.
 
 ## Per-unit availability is the headline requirement
 
@@ -419,6 +520,16 @@ symptom on 2026-08-12 was this and nothing else.
 Tests must not open sockets — `pytest-homeassistant-custom-component` fails the teardown if they do.
 Any test that creates a config entry needs the `mock_hub` fixture.
 
+`tests/test_hub.py` runs against **`modbus-connection`'s own in-memory mock**
+(`MockModbusConnection` / `MockModbusUnit`, also available as the auto-registered `mock_modbus_*`
+fixtures), so the stores and every error path come from upstream. Its `_BusUnit` adds the two things
+a *bus* test needs and a device mock has no reason to provide: a request that takes time on the
+wire, and the pacing wrapper the real pymodbus backend puts around every operation. Reaching into
+the connection's `_pacer` there is deliberate — it means the gap and the lock those tests assert are
+the library's real implementation, which is what the integration now depends on. `_BusMock` also
+models pymodbus's consecutive-silence disconnect, because that is a behaviour the hub has to
+survive rather than an artefact worth faking.
+
 **hassfest sorts the manifest**: `domain`, `name`, then strictly alphabetical. Adding a key in the
 place that reads best fails CI.
 
@@ -438,9 +549,9 @@ Record each answer here as it lands, so nobody re-derives it.
 ### Settled on hardware, 2026-08-12 — one Heat, firmware 48, unit id 1, CP2102 adapter
 
 - **The register base is 0-based (offset −1)** — manual N at wire N−1, the standard Modbus
-  convention and the code's existing default. `detect` calls it decisively on unit 1: at offset 0
-  the "mode" slot reads 200, the 20.0 °C override setpoint, which is not a mode. Exactly the
-  corroboration path this file predicted.
+  convention. `detect` called it decisively on unit 1: at offset 0 the "mode" slot reads 200, the
+  20.0 °C override setpoint, which is not a mode. **This is the measurement the search was deleted
+  on the strength of** — it is now `DEFAULT_REGISTER_OFFSET`, not something re-derived per install.
 - **8N1 at 9600 works.** Parity E and O, and 2 stop bits, are all silent — so 8N1 is not merely
   assumed any more. No other baud answered.
 - **Model scoring works on real firmware**: heat 14, timer 0, against a threshold of 5.

@@ -93,10 +93,15 @@ services:
     working_dir: /app
     volumes:
       - ./:/app:ro
+    # Both installs are needed. modbus-connection is what the integration now
+    # imports, and the image does not ship it - Home Assistant installs it from
+    # the manifest at setup, which only helps the HA container. The fake server
+    # imports custom_components.heatmiser_edge.const, which runs the package
+    # __init__ all the way down to hub.py, so it needs it too.
+    #
     # pymodbus 3.14 specifically: the image ships 3.13.1, whose SimData packs
-    # registers as *signed* shorts and dies on the RTC block's 0xFFFF seed. The
-    # integration itself is happy on 3.13 (manifest allows >=3.13,<4) - this pin
-    # is the simulator's requirement, not the component's.
+    # registers as *signed* shorts and dies on the RTC block's 0xFFFF seed. That
+    # pin is the simulator's requirement, not the component's.
     #
     # --host 0.0.0.0 matters too: the script defaults to 127.0.0.1, which inside
     # a container would refuse every connection from outside it.
@@ -105,7 +110,8 @@ services:
     entrypoint:
       - /bin/sh
       - -c
-      - pip install --quiet --no-cache-dir 'pymodbus>=3.14,<4' &&
+      - pip install --quiet --no-cache-dir 'modbus-connection[pymodbus]>=4.8.1,<5'
+        'pymodbus>=3.14,<4' &&
         exec python dev/fake_edge_server.py --host 0.0.0.0 --port 5020
     ports:
       - "5020:5020"
@@ -124,7 +130,8 @@ services:
     entrypoint:
       - /bin/sh
       - -c
-      - pip install --quiet --no-cache-dir 'pymodbus>=3.14,<4' &&
+      - pip install --quiet --no-cache-dir 'modbus-connection[pymodbus]>=4.8.1,<5'
+        'pymodbus>=3.14,<4' &&
         exec python dev/fake_edge_server.py --host 0.0.0.0 --port 5021 --offset 0
     ports:
       - "5021:5021"

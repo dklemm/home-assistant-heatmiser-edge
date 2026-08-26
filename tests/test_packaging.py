@@ -46,10 +46,12 @@ def test_the_manifest_declares_what_it_needs():
     assert manifest["iot_class"] == "local_polling"
     assert manifest["integration_type"] == "hub"
     requirements = " ".join(manifest["requirements"])
-    assert "pymodbus" in requirements
-    # pymodbus imports pyserial lazily and raises if it is missing, so the
-    # serial transport needs it declared even though pymodbus does not depend
-    # on it. Home Assistant happening to ship it is not something to rely on.
+    # The backend extra, not bare modbus-connection: the top-level package is a
+    # pure interface and installs no Modbus library at all.
+    assert "modbus-connection[pymodbus]" in requirements
+    # The extra reaches pyserial through pymodbus[serial], but RS485 is the
+    # transport this integration is *for*, so it is declared rather than
+    # inherited through two layers of extras.
     assert "pyserial" in requirements
 
 

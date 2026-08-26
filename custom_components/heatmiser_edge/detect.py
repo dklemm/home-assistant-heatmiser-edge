@@ -1,97 +1,30 @@
-"""Answering the two questions the manual doesn't.
+"""Answering the question the manual doesn't: is this a Heat or a Timer?
 
-**Is the wire 0-based?** The manual numbers registers from 1 and never says
-whether register N sits at wire address N or N-1. Register 31 settles it:
-"Communications ID (MODBUS)" necessarily holds the very id you addressed the
-request to, so whichever candidate offset makes register 31 read back the unit
-id is the right one. That is a self-verifying probe — no guessing, no hardcoded
-assumption about the firmware.
+There is no model or product-ID register. But the two variants disagree about
+most of registers 1-50: a Heat stat stores a frost setpoint, a floor limit and a
+switching differential whatever it happens to be doing, and a Timer marks that
+entire block Reserved (so it reads zero). Scoring those against each other
+separates them by a wide margin; the result is still only ever a *default the
+user confirms* in the config flow.
 
-**Is this a Heat or a Timer?** There is no model or product-ID register. But the
-two variants disagree about most of registers 1-50: a Heat stat stores a frost
-setpoint, a floor limit and a switching differential whatever it happens to be
-doing, and a Timer marks that entire block Reserved (so it reads zero). Scoring
-those against each other separates them by a wide margin; the result is still
-only ever a *default the user confirms* in the config flow.
-
-Both are pure functions over word maps, so the hub does the I/O and the tests do
-not need any.
+Pure functions over word maps, so the hub does the I/O and the tests need none.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .const import (
-    MAX_UNIT_ID,
-    MIN_UNIT_ID,
-    MODEL_HEAT,
-    MODEL_TIMER,
-    REG_COMMS_ID,
-)
+from .const import MAX_UNIT_ID, MIN_UNIT_ID, MODEL_HEAT, MODEL_TIMER
 
-# -1 = the standard Modbus convention (manual register N lives at wire N-1).
-#  0 = the firmware numbers the wire exactly as the manual does.
-OFFSET_ZERO_BASED = -1
-OFFSET_ONE_BASED = 0
-OFFSETS = (OFFSET_ZERO_BASED, OFFSET_ONE_BASED)
-
-# Below this the model guess is not trustworthy on its own — the config flow
-# flags it rather than quietly accepting it. Calibrated against the worst case
-# that matters: a *mis-offset* Heat map (the one situation that produces a
-# plausible-looking word map from a real stat) scores at most 4 either way it is
-# shifted, while a correctly-read Heat or Timer clears 10.
+# Below this the config flow flags the guess rather than quietly accepting it.
+# Calibrated against the worst case: a *mis-offset* Heat map - the one situation
+# producing a plausible map from real hardware - scores at most 4, while a
+# correctly-read Heat or Timer clears 10.
 MIN_MODEL_CONFIDENCE = 5
 
-# The five registers a discovery probe reads (manual 30-34). Small, so a silent
-# unit costs one short timeout, and dense in discriminating values.
+# What a discovery probe reads: small, so an absent id costs one short timeout.
 PROBE_START = 30
 PROBE_COUNT = 5
-
-
-def score_offset(
-    words_by_offset: dict[int, dict[int, int]], unit_id: int
-) -> int | None:
-    """Which candidate offset makes this unit's register 31 read its own id.
-
-    Register 31 on its own is not enough on unit 1: at the wrong offset the same
-    slot holds register 32, the thermostat's on/off flag, which also reads 1. So
-    the mode and on/off registers corroborate — usually decisively, because at
-    the wrong offset the "mode" slot holds the override setpoint (210 for a stat
-    set to 21.0 °C), which is not a mode.
-
-    Returns None when even that is ambiguous, which happens on a factory-fresh
-    unit 1 whose override setpoint has never been written and so reads 0 — a
-    valid mode as well as an unset setpoint. `resolve_offset` breaks that tie
-    from another unit rather than guessing here.
-    """
-    hits = [
-        offset
-        for offset, words in words_by_offset.items()
-        if words.get(REG_COMMS_ID) == unit_id
-        # Corroboration: at the true offset, 32 is an on/off flag and 33 is one
-        # of six modes. A coincidental match on 31 alone rarely satisfies both.
-        and words.get(32, 0) in (0, 1)
-        and words.get(33, 99) in range(0, 6)
-    ]
-    return hits[0] if len(hits) == 1 else None
-
-
-def resolve_offset(votes: dict[int, int | None]) -> tuple[int, bool]:
-    """Combine per-unit verdicts into one answer for the bus.
-
-    Ambiguity is per-unit, and any unit with id >= 6 is decisive, because no
-    other register in the 30-34 window can hold a value above 5. So one clear
-    voter settles it for everyone. Returns (offset, decisive).
-    """
-    decided = [offset for offset in votes.values() if offset is not None]
-    if not decided:
-        # Nothing was decisive. The standard convention is overwhelmingly the
-        # more likely, and the config flow exposes an override either way.
-        return OFFSET_ZERO_BASED, False
-    counts = {offset: decided.count(offset) for offset in set(decided)}
-    best = max(counts, key=lambda offset: counts[offset])
-    return best, True
 
 
 @dataclass(frozen=True)

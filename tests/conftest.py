@@ -186,24 +186,19 @@ def mock_hub(fake_bus):
     """
     writes: list[tuple[int, int, int]] = []
 
-    async def fake_connect(self, units=None) -> None:
-        if self.register_offset is None:
-            self.register_offset = -1
+    async def fake_connect(self) -> None:
+        return None
 
     async def fake_close(self) -> None:
         return None
 
-    async def fake_detect_offset(self, units) -> int:
-        self.register_offset = -1
-        return -1
-
-    async def fake_probe_unit(self, unit_id, offset=None):
+    async def fake_probe_unit(self, unit_id):
         words = fake_bus.get(unit_id)
         if words is None:
             return None
         return {n: words[n] for n in range(30, 35)}
 
-    async def fake_read_block(self, unit_id, start, count, timeout=None):
+    async def fake_read_block(self, unit_id, start, count):
         words = fake_bus.get(unit_id)
         if words is None:
             return None
@@ -231,7 +226,6 @@ def mock_hub(fake_bus):
     with (
         patch.object(EdgeHub, "async_connect", fake_connect),
         patch.object(EdgeHub, "async_close", fake_close),
-        patch.object(EdgeHub, "async_detect_offset", fake_detect_offset),
         patch.object(EdgeHub, "async_probe_unit", fake_probe_unit),
         patch.object(EdgeHub, "async_read_block", fake_read_block),
         patch.object(EdgeHub, "async_read_units", fake_read_units),

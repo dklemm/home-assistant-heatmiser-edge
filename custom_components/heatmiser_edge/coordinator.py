@@ -378,26 +378,14 @@ class EdgeCoordinator(DataUpdateCoordinator[dict[int, UnitData]]):
     def _schedule_settle(self, unit_id: int, step: int = 0) -> None:
         """Keep asking this thermostat until it has acted on the write.
 
-        The immediate read-back lands ~80 ms after the write, which is soon
-        enough for the register that was *written* - measured on hardware,
-        register 34 already held the new value there - but far too soon for the
-        ones that reflect the stat acting on it. Register 7, the live setpoint
-        every UI surface actually reads, and the relay at register 2 both lag by
-        appreciably longer. Without this they would hold their old values until
-        the next scheduled poll, up to `MAX_SCAN_INTERVAL` away.
+        The immediate read-back is soon enough for the register that was written
+        but far too early for the ones reflecting the stat acting on it; without
+        this they hold stale values until the next poll. `const.SETTLE_PROBES`
+        records the hardware measurements behind the schedule.
 
-        Probes run on the widening `SETTLE_PROBES` schedule, publishing whatever
-        each one finds. The schedule runs **to its end** rather than stopping at
-        the first change, because the stat's registers do not all move together:
-        measured on hardware, register 7 caught up 1.6 s after a write while the
-        relay at register 2 had not moved yet. Stopping on the first difference
-        published the new setpoint and then left the relay stale until the next
-        scheduled poll - which is the original complaint, moved rather than
-        fixed.
-
-        Re-armed rather than stacked, so a burst of writes - dragging a setpoint
-        - runs one schedule from the last of them, not one per write on a bus
-        that cannot afford them.
+        It runs **to its end** rather than stopping at the first change, because
+        the registers do not all move together. Re-armed rather than stacked, so a
+        burst of writes runs one schedule from the last of them.
         """
         if (cancel := self._settling.pop(unit_id, None)) is not None:
             cancel()
@@ -452,28 +440,20 @@ class EdgeCoordinator(DataUpdateCoordinator[dict[int, UnitData]]):
     async def async_refresh_unit(self, unit_id: int, *, settle: bool = False) -> None:
         """Re-read one thermostat now, and publish it. The read-back after a write.
 
-        `async_request_refresh()` cannot do this job, for two reasons that both
-        show up as a control snapping back to its old value in the UI:
+        `async_request_refresh()` cannot do this job, and both reasons show up as
+        a control snapping back to its old value:
 
-        - **It is debounced**, with a 10 s cooldown. The first call runs at once,
-          but a second inside that window is deferred to the end of the timer -
-          and dragging a setpoint is exactly a burst of writes. Every one after
-          the first would show the previous reading for up to ten seconds.
-        - **It re-polls the whole bus.** At 9600 baud with the manual's 50 ms
-          gap, a wire of 32 thermostats is seconds of stale card for a change to
-          one of them - longer still if any of them are silent and timing out.
+        - **It is debounced**, 10 s. Dragging a setpoint is a burst of writes, so
+          every one after the first would show the previous reading.
+        - **It re-polls the whole bus** - seconds of stale card at 9600 baud for a
+          change to one of 32 stats, longer if any are timing out.
 
-        So this reads only the stat that was written, one FC03, and patches that
-        one entry in `data`. It is still a read-back, not an assumption: what
-        lands in the UI is what the thermostat kept.
+        So this reads one stat, one FC03, and patches that entry in `data`. A
+        failure is deliberately quiet: the write already succeeded or raised, and
+        a bus that has since gone away is the next poll's news to break.
 
-        A failure here is deliberately quiet. The write itself already succeeded
-        or raised; a bus that has since gone away is the next scheduled poll's
-        news to break, not a write's.
-
-        `settle` starts the probe schedule that waits for the thermostat to
-        act on the write - see `_schedule_settle`. Every write sets it; the
-        settle probes do not, or they would never stop.
+        `settle` starts `_schedule_settle`. Every write sets it; the settle probes
+        do not, or they would never stop.
         """
         unit = self.unit_config(unit_id)
         if unit is None:

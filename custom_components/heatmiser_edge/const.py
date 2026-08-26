@@ -68,7 +68,20 @@ MAX_TIMEOUT = 10.0
 # each keeps a full 1-32 sweep near 18 s instead of a minute.
 SCAN_TIMEOUT = 0.5
 
+# How often the scan's progress dialog re-renders. Deliberately a clock and not
+# "once per unit id": a stat that answers takes ~150 ms and an absent one pays a
+# full SCAN_TIMEOUT, so per-unit updates arrive at wildly uneven intervals and
+# the dialog visibly stutters.
+SCAN_PROGRESS_INTERVAL = 1.0
+
 INTER_TRANSACTION_GAP = 0.05  # manual: "read and write data interval greater than 50 ms"
+
+# Manual register N at wire N-1: the standard Modbus convention. The manual never
+# says, so this was settled on hardware and confirmed across 1-218 (see CLAUDE.md).
+# A setting rather than a constant only so a stat that disagreed could be fixed
+# without a release; `EdgeHub._check_register_base` warns when one does.
+DEFAULT_REGISTER_OFFSET = -1
+REGISTER_OFFSETS = (-1, 0)
 
 # When to ask the thermostat again after a write, until it has actually acted.
 # Seconds after the write, not gaps between probes.
@@ -115,22 +128,61 @@ MIN_UNIT_ID = 1
 MAX_UNIT_ID = 32
 VALID_UNIT_IDS = range(MIN_UNIT_ID, MAX_UNIT_ID + 1)
 
-REG_COMMS_ID = 31  # equals the addressed unit id: the register-offset discriminator
-REG_TEMP_FORMAT = 21  # 0 = degC, 1 = degF; re-reads the meaning of every temperature
+# Every register the code names, in the manual's own order. The curated tables
+# below are built from these rather than from bare numbers: a set of integers
+# says nothing about what it collects, and the two variants disagree about what
+# several of the numbers mean.
+#
+# That disagreement is the one trap. A bare name is the **Heat** map's meaning,
+# which is also the shared one wherever both variants agree; `REG_TIMER_*` names
+# the five registers where the Timer puts something else at the same number.
+# `tests/test_registers.py` checks every number a table names against that
+# model's map, so a Heat name in a Timer table is caught where the two maps
+# disagree about which registers exist at all.
+REG_FIRMWARE = 1
 REG_RELAY = 2
 REG_ROOM_TEMP = 3
+REG_TIMER_ONOFF_READBACK = 3
 REG_FLOOR_TEMP = 4
+REG_TIMER_CURRENT_PERIOD = 4
 REG_REMOTE_TEMP = 5
+REG_TIMER_NEXT_PERIOD = 5
+REG_WINDOW = 6
+REG_TIMER_DST_ACTIVE = 6
 REG_CURRENT_SETPOINT = 7
+REG_ONOFF_READBACK = 8
+REG_MODE_READBACK = 9
+REG_CURRENT_PERIOD = 10
+REG_NEXT_PERIOD = 11
+REG_DST_ACTIVE = 12
+REG_RATE_OF_CHANGE = 13
+REG_BOARD_TEMP_RAW = 15
+REG_BOARD_TEMP = 16
+REG_TEMP_FORMAT = 21  # 0 = degC, 1 = degF; re-reads the meaning of every temperature
+REG_SWITCHING_DIFFERENTIAL = 22
+REG_OUTPUT_DELAY = 23
+REG_UPDOWN_LIMIT = 24
 REG_SENSOR_SELECTION = 25
+REG_FLOOR_LIMIT = 26
+REG_OPTIMUM_START = 27
+REG_PROGRAM_TYPE = 28  # 0 = 4 period, 1 = 6 period. Heat only; Reserved on Timer
+REG_PROGRAM_MODE = 29  # gates which operation modes the stat will accept
+REG_DST_ENABLED = 30
+REG_COMMS_ID = 31  # equals the addressed unit id: the register-offset discriminator
 REG_ONOFF = 32
 REG_OPERATION_MODE = 33
 REG_HOLD_SETPOINT = 34
-REG_FIRMWARE = 1
-REG_DST_ENABLED = 30
-REG_PROGRAM_TYPE = 28  # 0 = 4 period, 1 = 6 period. Heat only; Reserved on Timer
-REG_PROGRAM_MODE = 29  # gates which operation modes the stat will accept
+REG_TIMER_OUTPUT_FORCE = 34
+REG_ADVANCED_SETPOINT = 35
+REG_FROST_SETPOINT = 37
 REG_HOLD_DURATION = 38  # high byte hours (0-99), low byte minutes (0-59)
+REG_AWAY_TIME = 39
+REG_AWAY_DATE = 40
+REG_AWAY_YEAR = 41
+REG_KEYLOCK = 42
+REG_TPI = 43
+REG_TPI_MIN_ON = 44
+REG_FACTORY_RESET = 46
 # The RTC is four contiguous registers holding one timestamp: year, month+day,
 # hour+minute, second. They are write-only in practice - each reads back 0xFFFF
 # once the stat has taken the time - so they are set by an action, not shown by
@@ -294,24 +346,24 @@ _DST = SwitchSpec(on=1, off=0)
 
 NUMBERS: dict[str, dict[int, NumberSpec]] = {
     MODEL_HEAT: {
-        23: NumberSpec(0, 15, 1, unit="min"),
+        REG_OUTPUT_DELAY: NumberSpec(0, 15, 1, unit="min"),
         # Manual: "00 - 10 degC (0-18 degF)", Value = Settemperature x 10.
-        24: NumberSpec(0, 10, 0.5, 0, 18, 1),
-        26: NumberSpec(20, 45, 0.5, 68, 113, 1),
-        35: NumberSpec(
+        REG_UPDOWN_LIMIT: NumberSpec(0, 10, 0.5, 0, 18, 1),
+        REG_FLOOR_LIMIT: NumberSpec(20, 45, 0.5, 68, 113, 1),
+        REG_ADVANCED_SETPOINT: NumberSpec(
             SETPOINT_MIN_C, SETPOINT_MAX_C, SETPOINT_STEP_C,
             SETPOINT_MIN_F, SETPOINT_MAX_F, SETPOINT_STEP_F,
             enabled=False,
         ),
-        37: NumberSpec(7, 17, 0.5, 45, 63, 1),
-        # Register 38 packs hours in the high byte and minutes in the low byte.
-        # It ships as ONE entity in minutes: two entities writing one register
-        # is a read-modify-write race, and 210 is what an automation means by
-        # "3h30m". 99h59m is the manual's maximum.
-        38: NumberSpec(0, 5999, 1, unit="min"),
+        REG_FROST_SETPOINT: NumberSpec(7, 17, 0.5, 45, 63, 1),
+        # The hold duration packs hours in the high byte and minutes in the low
+        # byte. It ships as ONE entity in minutes: two entities writing one
+        # register is a read-modify-write race, and 210 is what an automation
+        # means by "3h30m". 99h59m is the manual's maximum.
+        REG_HOLD_DURATION: NumberSpec(0, 5999, 1, unit="min"),
     },
     MODEL_TIMER: {
-        38: NumberSpec(0, 5999, 1, unit="min"),
+        REG_HOLD_DURATION: NumberSpec(0, 5999, 1, unit="min"),
     },
 }
 
@@ -320,11 +372,11 @@ SELECTS: dict[str, dict[int, SelectSpec]] = {
         # The manual gives degC values 0.5/1/2/3 with "Value = Settemperature x
         # 10", so 5/10/20/30 on the wire, and degF labels 1/2/4/6. Whether the
         # *wire* values change in degF mode is NOT stated - see CLAUDE.md.
-        22: SelectSpec(
+        REG_SWITCHING_DIFFERENTIAL: SelectSpec(
             {5: "0.5 °C", 10: "1 °C", 20: "2 °C", 30: "3 °C"},
             {5: "1 °F", 10: "2 °F", 20: "4 °F", 30: "6 °F"},
         ),
-        25: SelectSpec(
+        REG_SENSOR_SELECTION: SelectSpec(
             {
                 0: "Built-in and remote air",
                 1: "Remote air only",
@@ -333,7 +385,7 @@ SELECTS: dict[str, dict[int, SelectSpec]] = {
                 4: "Floor and remote only",
             }
         ),
-        27: SelectSpec(
+        REG_OPTIMUM_START: SelectSpec(
             {
                 0: "Disabled",
                 1: "1 hour",
@@ -343,26 +395,26 @@ SELECTS: dict[str, dict[int, SelectSpec]] = {
                 5: "5 hours",
             }
         ),
-        28: SelectSpec({0: "4 period", 1: "6 period"}),
-        29: _PROGRAM_MODE,
-        33: SelectSpec(OPERATION_MODES[MODEL_HEAT], category=None),
+        REG_PROGRAM_TYPE: SelectSpec({0: "4 period", 1: "6 period"}),
+        REG_PROGRAM_MODE: _PROGRAM_MODE,
+        REG_OPERATION_MODE: SelectSpec(OPERATION_MODES[MODEL_HEAT], category=None),
     },
     MODEL_TIMER: {
-        29: _PROGRAM_MODE,
-        33: SelectSpec(OPERATION_MODES[MODEL_TIMER], category=None),
+        REG_PROGRAM_MODE: _PROGRAM_MODE,
+        REG_OPERATION_MODE: SelectSpec(OPERATION_MODES[MODEL_TIMER], category=None),
     },
 }
 
 SWITCHES: dict[str, dict[int, SwitchSpec]] = {
     MODEL_HEAT: {
-        30: _DST,
+        REG_DST_ENABLED: _DST,
     },
     MODEL_TIMER: {
-        30: _DST,
-        32: SwitchSpec(on=1, off=0, device_class="switch", category=None),
+        REG_DST_ENABLED: _DST,
+        REG_ONOFF: SwitchSpec(on=1, off=0, device_class="switch", category=None),
         # "Timer Out force ... In the Hold and Advanced mode": the stat only
         # honours this in modes 2 and 3, so it goes unavailable elsewhere.
-        34: SwitchSpec(
+        REG_TIMER_OUTPUT_FORCE: SwitchSpec(
             on=1,
             off=0,
             requires_mode=(MODE_HOLD, MODE_ADVANCED),
@@ -376,13 +428,13 @@ SWITCHES: dict[str, dict[int, SwitchSpec]] = {
 # HA device class (None = a plain on/off with no class).
 BINARY: dict[str, dict[int, str | None]] = {
     MODEL_HEAT: {
-        2: "heat",
-        6: "window",
-        12: None,
+        REG_RELAY: "heat",
+        REG_WINDOW: "window",
+        REG_DST_ACTIVE: None,
     },
     MODEL_TIMER: {
-        2: "running",
-        6: None,
+        REG_RELAY: "running",
+        REG_TIMER_DST_ACTIVE: None,
     },
 }
 
@@ -402,10 +454,19 @@ BINARY: dict[str, dict[int, str | None]] = {
 #    and the year *together*. Three separate numbers would leave the thermostat
 #    on a half-changed deadline in between, so this becomes one datetime entity
 #    over FC16 in v2 - and reads only until then.
-_AWAY_READBACK = {39: "sensor", 40: "sensor", 41: "sensor"}
+_AWAY_READBACK = {
+    REG_AWAY_TIME: "sensor",
+    REG_AWAY_DATE: "sensor",
+    REG_AWAY_YEAR: "sensor",
+}
 READ_ONLY_RW: dict[str, dict[int, str]] = {
-    MODEL_HEAT: {21: "sensor", 31: "sensor", 42: "binary_sensor", **_AWAY_READBACK},
-    MODEL_TIMER: {31: "sensor", **_AWAY_READBACK},
+    MODEL_HEAT: {
+        REG_TEMP_FORMAT: "sensor",
+        REG_COMMS_ID: "sensor",
+        REG_KEYLOCK: "binary_sensor",
+        **_AWAY_READBACK,
+    },
+    MODEL_TIMER: {REG_COMMS_ID: "sensor", **_AWAY_READBACK},
 }
 
 # Registers that produce no entity of their own at all.
@@ -428,10 +489,26 @@ READ_ONLY_RW: dict[str, dict[int, str]] = {
 # argument, and it applies harder here: 42 at least reads back something we can
 # show. Even the readings are meaningless until the encoding is known, so there
 # is nothing worth putting on a dashboard either.
-_NEVER_SHIPPED = frozenset({43, 44, 46, 47, 48, 49, 50})
+_NEVER_SHIPPED = frozenset(
+    {REG_TPI, REG_TPI_MIN_ON, REG_FACTORY_RESET, *range(REG_RTC, REG_RTC + RTC_BLOCK)}
+)
 SUPPRESSED: dict[str, frozenset[int]] = {
-    MODEL_HEAT: frozenset({7, 8, 9, 32, 33, 34}) | _NEVER_SHIPPED,
-    MODEL_TIMER: frozenset({3, 9}) | _NEVER_SHIPPED,
+    # The climate entity owns these six, and 8 and 9 are read-only mirrors of
+    # the writable 32 and 33.
+    MODEL_HEAT: frozenset(
+        {
+            REG_CURRENT_SETPOINT,
+            REG_ONOFF_READBACK,
+            REG_MODE_READBACK,
+            REG_ONOFF,
+            REG_OPERATION_MODE,
+            REG_HOLD_SETPOINT,
+        }
+    )
+    | _NEVER_SHIPPED,
+    # A Timer has no climate entity, so only its mirrors go.
+    MODEL_TIMER: frozenset({REG_TIMER_ONOFF_READBACK, REG_MODE_READBACK})
+    | _NEVER_SHIPPED,
 }
 
 # Read-only registers with a documented legend become ENUM sensors: "Period 2"
@@ -449,31 +526,71 @@ _SCHEDULE_PERIODS_4 = {k: v for k, v in _SCHEDULE_PERIODS_6.items() if k <= 4}
 
 ENUMS: dict[str, dict[int, dict[int, str]]] = {
     MODEL_HEAT: {
-        10: _SCHEDULE_PERIODS_6,
-        11: _SCHEDULE_PERIODS_6,
-        21: {0: "Celsius", 1: "Fahrenheit"},
+        REG_CURRENT_PERIOD: _SCHEDULE_PERIODS_6,
+        REG_NEXT_PERIOD: _SCHEDULE_PERIODS_6,
+        REG_TEMP_FORMAT: {0: "Celsius", 1: "Fahrenheit"},
     },
     MODEL_TIMER: {
-        4: _SCHEDULE_PERIODS_4,
-        5: _SCHEDULE_PERIODS_4,
+        REG_TIMER_CURRENT_PERIOD: _SCHEDULE_PERIODS_4,
+        REG_TIMER_NEXT_PERIOD: _SCHEDULE_PERIODS_4,
     },
 }
 
-# Read-only registers that ship disabled: bookkeeping, or a probe most installs
-# do not fit (an unconnected floor sensor reads 0, which decode.py turns into
-# unknown rather than a fictional 0.0 degC).
+# Read-only registers that ship disabled: bookkeeping, or an accessory most
+# installs do not fit - the floor and remote probes (an unconnected one reads 0,
+# which decode.py turns into unknown rather than a fictional 0.0 degC) and the
+# window contact at 6, which is a separate part and reads a permanent "closed"
+# without one.
+_AWAY = frozenset({REG_AWAY_TIME, REG_AWAY_DATE, REG_AWAY_YEAR})
 DISABLED_BY_DEFAULT: dict[str, frozenset[int]] = {
-    MODEL_HEAT: frozenset({4, 5, 12, 13, 15, 16, 21, 31, 39, 40, 41, 42}),
-    MODEL_TIMER: frozenset({6, 31, 39, 40, 41}),
+    MODEL_HEAT: frozenset(
+        {
+            REG_FLOOR_TEMP,
+            REG_REMOTE_TEMP,
+            REG_WINDOW,
+            REG_DST_ACTIVE,
+            REG_RATE_OF_CHANGE,
+            REG_BOARD_TEMP_RAW,
+            REG_BOARD_TEMP,
+            REG_TEMP_FORMAT,
+            REG_COMMS_ID,
+            REG_KEYLOCK,
+        }
+    )
+    | _AWAY,
+    MODEL_TIMER: frozenset({REG_TIMER_DST_ACTIVE, REG_COMMS_ID}) | _AWAY,
 }
 
 # Temperature registers holding a *difference*, not a reading. They must not
 # carry a temperature device class: Home Assistant would convert 5 °C to 41 °F,
 # which is right for a temperature and wrong for a 5-degree span.
-TEMPERATURE_DELTA = frozenset({24})
+TEMPERATURE_DELTA = frozenset({REG_UPDOWN_LIMIT})
 
 # Read-only registers in the diagnostic entity category.
 DIAGNOSTIC: dict[str, frozenset[int]] = {
-    MODEL_HEAT: frozenset({1, 10, 11, 12, 13, 15, 16, 21, 31, 39, 40, 41, 42}),
-    MODEL_TIMER: frozenset({1, 4, 5, 6, 31, 39, 40, 41}),
+    MODEL_HEAT: frozenset(
+        {
+            REG_FIRMWARE,
+            REG_CURRENT_PERIOD,
+            REG_NEXT_PERIOD,
+            REG_DST_ACTIVE,
+            REG_RATE_OF_CHANGE,
+            REG_BOARD_TEMP_RAW,
+            REG_BOARD_TEMP,
+            REG_TEMP_FORMAT,
+            REG_COMMS_ID,
+            REG_KEYLOCK,
+        }
+    )
+    | _AWAY,
+    MODEL_TIMER: frozenset(
+        {
+            REG_FIRMWARE,
+            REG_TIMER_CURRENT_PERIOD,
+            REG_TIMER_NEXT_PERIOD,
+            REG_TIMER_DST_ACTIVE,
+            REG_COMMS_ID,
+        }
+    )
+    | _AWAY,
 }

@@ -23,6 +23,7 @@ from .const import (
     CONF_FRAMER,
     CONF_PARITY,
     CONF_REGISTER_OFFSET,
+    DEFAULT_REGISTER_OFFSET,
     CONF_SERIAL_PORT,
     CONF_STOPBITS,
     CONF_TIMEOUT,
@@ -77,7 +78,7 @@ def build_hub(entry: ConfigEntry) -> EdgeHub:
         timeout=option(entry, CONF_TIMEOUT, DEFAULT_TIMEOUT),
         # None means "probe for it". The config flow normally stores an answer,
         # so a restart does not re-probe the bus.
-        register_offset=option(entry, CONF_REGISTER_OFFSET, None),
+        register_offset=option(entry, CONF_REGISTER_OFFSET, DEFAULT_REGISTER_OFFSET),
     )
 
 
@@ -133,7 +134,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: EdgeConfigEntry) -> bool
     hub = build_hub(entry)
     coordinator = EdgeCoordinator(hass, entry, hub)
     try:
-        await hub.async_connect([unit.unit_id for unit in coordinator.units])
+        await hub.async_connect()
     except EdgeConnectionError as err:
         await hub.async_close()
         raise ConfigEntryNotReady(str(err)) from err
