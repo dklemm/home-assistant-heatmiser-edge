@@ -533,8 +533,8 @@ survive rather than an artefact worth faking.
 **hassfest sorts the manifest**: `domain`, `name`, then strictly alphabetical. Adding a key in the
 place that reads best fails CI.
 
-Release: bump `manifest.json` → tag `vX.Y.Z` → GitHub release. CI is hassfest, HACS (`ignore: brands`
-permanently) and pytest on 3.14. No ruff, no mypy.
+Release: bump `manifest.json` → tag `vX.Y.Z` → GitHub release. CI is hassfest, HACS and pytest on
+3.14. No ruff, no mypy.
 
 `strings.json` is authored and **copied byte-for-byte** to `translations/en.json`; a test gates that.
 
@@ -546,6 +546,43 @@ for the sibling protocol. Custom-integration folders in that repo cannot symlink
 core-to-core symlinks are allowed), so the files are duplicated rather than shared by reference, but
 the two show the same flame logo in the integrations list as a result. Confirmed 2026-08-26; the CI
 HACS check's `ignore: brands` was removed the same day since the domain does have a valid entry.
+
+### "Brands" means two different things, and only one of them is available to us
+
+This is the trap. Sharing the icon does **not** group the two Heatmiser rows in *Add Integration*,
+and that is not a cosmetic shortfall — grouping is a genuinely separate mechanism we cannot reach.
+
+- **`home-assistant/brands`** (the images repo, above) serves icons and logos. This is the one we
+  are in, and all it does is put the same picture on a row.
+- **`homeassistant/brands/*.json`** (inside core) declares a brand with an `integrations` list —
+  `amazon.json` names `alexa`, `aws`, `fire_tv` and the rest — which becomes a nested `integrations`
+  dict in `homeassistant/generated/integrations.json` and renders as one expandable group in the
+  dialog. **This is the grouping, and it is core-only.**
+
+`loader.py`'s `async_get_integration_descriptions` is where that is settled, and it is worth reading
+rather than re-arguing:
+
+- The core list is read from the **static** `generated/integrations.json` shipped inside the
+  `homeassistant` package. Nothing a custom integration does can write into it.
+- Custom integrations are enumerated separately into a flat metadata dict — `config_flow`,
+  `integration_type`, `iot_class`, `name`, `single_config_entry`, `overwrites_built_in` — with **no
+  `integrations` key at all**, which is precisely the key that makes a group. The frontend cannot
+  group what it is never told about.
+- It returns `{"core": …, "custom": …}`: two separate buckets by construction.
+
+hassfest enforces the same boundary from the other side: `script/hassfest/brand.py` rejects a brand
+file that references an unknown integration, and `model.py` sets
+`core_integrations_path = root / "homeassistant/components"`, so a brand may only ever list core
+domains.
+
+**Do not try to group by claiming the `heatmiser` domain.** `async_get_integration_descriptions`
+deletes the core entry when a custom integration shares its domain, so that would not merge the two
+rows — it would *hide core Heatmiser* from every user who installs this. The only real route is
+`heatmiser_edge` landing in core alongside a `homeassistant/brands/heatmiser.json` naming both; note
+that file would also have to list `heatmiser` itself, since a brand whose domain is also an
+integration must appear in its own `integrations` list.
+
+Settled 2026-08-26 by reading core, after the shared icon was mistaken for grouping.
 
 ## Still open, to settle on hardware
 
