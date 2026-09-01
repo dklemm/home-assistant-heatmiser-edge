@@ -77,6 +77,8 @@ class EdgeHub:
         self.port = port
         self.framer = framer
         self.timeout = timeout
+        # Fixed everywhere the integration builds a hub; only
+        # `dev/edge_modbus_test.py detect` ever reads at the other base.
         self.register_offset = register_offset
         self.unit_failures: dict[int, int] = {}
 
@@ -227,9 +229,9 @@ class EdgeHub:
             return
         self._base_warned.add(unit_id)
         _LOGGER.warning(
-            "Unit %s on %s reports its communications id as %s. The register "
-            "base is probably wrong, which shifts every reading by one register "
-            "- try changing it in the integration options",
+            "Unit %s on %s reports its communications id as %s. Every reading "
+            "from it is probably shifted by one register - please report this, "
+            "with the thermostat's model and code version",
             unit_id,
             self.label,
             reported,

@@ -10,13 +10,9 @@
       },
       "serial": {
         "title": "USB RS485 adapter",
-        "description": "The EDGE manual specifies 9600 baud with no parity. It says nothing about data or stop bits, so 8N1 is assumed — change them only if that does not work.",
+        "description": "EDGE thermostats talk at 9600 baud, 8 data bits, no parity, 1 stop bit, and nothing else, so there is nothing to set here beyond the port.",
         "data": {
           "serial_port": "Serial port",
-          "baudrate": "Baud rate",
-          "bytesize": "Data bits",
-          "parity": "Parity",
-          "stopbits": "Stop bits",
           "unit_ids": "Communications IDs (Modbus) to look for"
         },
         "data_description": {
@@ -76,14 +72,12 @@
         "data": {
           "scan_interval": "Polling interval",
           "timeout": "Response timeout",
-          "controls": "Allow changing settings",
-          "register_offset": "Register addressing"
+          "controls": "Allow changing settings"
         },
         "data_description": {
           "scan_interval": "Every thermostat is read once per interval, which takes about a fifth of a second each at 9600 baud.",
           "timeout": "How long to wait for a thermostat to answer before treating it as absent.",
-          "controls": "Turn this off to make the integration read-only. Every setting, mode and setpoint control disappears; readings are unaffected.",
-          "register_offset": "Change this only if the log warns that a thermostat reports the wrong communications ID, or every reading looks like it belongs to the neighbouring register."
+          "controls": "Turn this off to make the integration read-only. Every setting, mode and setpoint control disappears; readings are unaffected."
         }
       }
     }

@@ -13,16 +13,12 @@ from homeassistant.const import CONF_HOST, CONF_PORT, CONF_SCAN_INTERVAL
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.heatmiser_edge import config_flow
 from custom_components.heatmiser_edge.const import (
-    CONF_BAUDRATE,
-    CONF_BYTESIZE,
     CONF_CONTROLS,
     CONF_FRAMER,
     CONF_MODEL,
-    CONF_PARITY,
-    CONF_REGISTER_OFFSET,
     CONF_SERIAL_PORT,
-    CONF_STOPBITS,
     CONF_TIMEOUT,
     CONF_TRANSPORT,
     CONF_UNIT_ID,
@@ -36,9 +32,7 @@ from custom_components.heatmiser_edge.const import (
     TRANSPORT_SERIAL,
     TRANSPORT_TCP,
 )
-from custom_components.heatmiser_edge import config_flow
 from custom_components.heatmiser_edge.hub import EdgeConnectionError, EdgeHub
-
 
 TCP_INPUT = {
     CONF_HOST: "10.0.0.5",
@@ -48,10 +42,6 @@ TCP_INPUT = {
 }
 SERIAL_INPUT = {
     CONF_SERIAL_PORT: "/dev/ttyUSB0",
-    CONF_BAUDRATE: 9600,
-    CONF_BYTESIZE: 8,
-    CONF_PARITY: "N",
-    CONF_STOPBITS: 1,
     CONF_UNIT_IDS: "1-4",
 }
 
@@ -160,8 +150,6 @@ async def test_tcp_flow_creates_an_entry(hass, words, mock_hub):
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"][CONF_TRANSPORT] == TRANSPORT_TCP
-    # Setup never asks for the register base; it is an option with a default.
-    assert CONF_REGISTER_OFFSET not in result["data"]
     assert result["data"][CONF_UNITS] == [
         {CONF_UNIT_ID: 1, CONF_MODEL: MODEL_HEAT, "name": "Hall"},
         {CONF_UNIT_ID: 2, CONF_MODEL: MODEL_TIMER, "name": "HW"},
@@ -177,7 +165,9 @@ async def test_serial_flow_creates_an_entry(hass, words, mock_hub):
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"][CONF_SERIAL_PORT] == "/dev/ttyUSB0"
-    assert result["data"][CONF_BAUDRATE] == 9600
+    # The framing is fixed at 9600 8N1, so the form asks for the port and nothing
+    # else - and nothing stores a baud rate that could later be read back wrong.
+    assert set(result["data"]) == {CONF_TRANSPORT, CONF_SERIAL_PORT, CONF_UNIT_IDS, CONF_UNITS}
 
 
 async def test_the_model_guess_is_only_a_default(hass, words, mock_hub):
@@ -334,17 +324,12 @@ async def test_the_default_id_list_is_the_whole_range(hass, transport, required)
     assert result["data_schema"](required)[CONF_UNIT_IDS] == "1-32"
 
 
-async def test_the_register_base_defaults_to_the_standard_convention(hass):
-    """-1 unless a user says otherwise; there is no search to second-guess them."""
+async def test_the_register_base_is_fixed(hass):
+    """One answer on every device seen, so nothing in the flow may set it."""
     from custom_components.heatmiser_edge.config_flow import build_scan_hub
 
     hub = build_scan_hub({**TCP_INPUT, CONF_TRANSPORT: TRANSPORT_TCP})
     assert hub.register_offset == DEFAULT_REGISTER_OFFSET
-
-    hub = build_scan_hub(
-        {**TCP_INPUT, CONF_TRANSPORT: TRANSPORT_TCP, CONF_REGISTER_OFFSET: "0"}
-    )
-    assert hub.register_offset == 0
 
 
 # ----------------------------------------------------------------------
@@ -365,7 +350,6 @@ async def test_options_round_trip(hass, mock_hub):
             CONF_SCAN_INTERVAL: 120,
             CONF_TIMEOUT: 2.0,
             CONF_CONTROLS: False,
-            CONF_REGISTER_OFFSET: "0",
             **naming(
                 (1, "Hallway", MODEL_HEAT),
                 (2, "Hot water", MODEL_TIMER),
@@ -376,16 +360,15 @@ async def test_options_round_trip(hass, mock_hub):
     await hass.async_block_till_done()
     assert entry.options[CONF_SCAN_INTERVAL] == 120
     assert entry.options[CONF_CONTROLS] is False
-    assert entry.options[CONF_REGISTER_OFFSET] == 0
     assert entry.options[CONF_UNITS][0]["name"] == "Hallway"
     # Options changing reloads the entry, so the rename takes effect at once.
     assert entry.runtime_data.units[0].name == "Hallway"
 
 
-async def test_a_rescan_honours_an_offset_set_in_options(hass, mock_hub):
-    """The base is an option, so a re-scan must read it from there.
+async def test_a_rescan_ignores_a_register_offset_left_in_options(hass, mock_hub):
+    """The base used to be an option. Entries set up then still carry it.
 
-    Setup does not ask for it, so it never reaches `entry.data` - and a re-scan
+    It is one constant now, so a stale option must not steer a re-scan - which
     at the wrong base finds no thermostats and reads as an empty bus.
     """
     entry = MockConfigEntry(
@@ -397,7 +380,7 @@ async def test_a_rescan_honours_an_offset_set_in_options(hass, mock_hub):
             CONF_PORT: 502,
             CONF_UNIT_IDS: "1-4",
         },
-        options={CONF_REGISTER_OFFSET: 0},
+        options={"register_offset": 0},
     )
     entry.add_to_hass(hass)
     seen = {}
@@ -418,7 +401,7 @@ async def test_a_rescan_honours_an_offset_set_in_options(hass, mock_hub):
         )
         await drive_scan(hass, result)
 
-    assert seen["offset"] == 0
+    assert seen["offset"] == DEFAULT_REGISTER_OFFSET
 
 
 async def test_reconfigure_rescans_and_keeps_existing_names(hass, mock_hub, words):

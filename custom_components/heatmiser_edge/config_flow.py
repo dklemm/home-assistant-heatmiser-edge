@@ -46,26 +46,16 @@ from homeassistant.helpers.selector import (
 )
 
 from .const import (
-    CONF_BAUDRATE,
-    CONF_BYTESIZE,
     CONF_CONTROLS,
     CONF_FRAMER,
     CONF_MODEL,
-    CONF_PARITY,
-    CONF_REGISTER_OFFSET,
     CONF_SERIAL_PORT,
-    CONF_STOPBITS,
     CONF_TIMEOUT,
     CONF_TRANSPORT,
     CONF_UNIT_ID,
     CONF_UNIT_IDS,
     CONF_UNITS,
-    DEFAULT_BAUDRATE,
-    DEFAULT_BYTESIZE,
-    DEFAULT_PARITY,
-    DEFAULT_REGISTER_OFFSET,
     DEFAULT_SCAN_INTERVAL,
-    DEFAULT_STOPBITS,
     DEFAULT_TCP_PORT,
     DEFAULT_TIMEOUT,
     DOMAIN,
@@ -86,7 +76,6 @@ from .const import (
     TRANSPORT_SERIAL,
     TRANSPORT_TCP,
 )
-from .coordinator import option
 from .detect import ModelGuess, guess_model, parse_id_list
 from .hub import EdgeConnectionError, EdgeHub
 
@@ -103,10 +92,6 @@ _LEGACY_SCAN_ALL = "scan_all"
 
 _MODEL_OPTIONS = [
     SelectOptionDict(value=model, label=MODEL_LABELS[model]) for model in MODELS
-]
-_OFFSET_OPTIONS = [
-    SelectOptionDict(value="-1", label="0-based (register N at address N-1)"),
-    SelectOptionDict(value="0", label="1-based (register N at address N)"),
 ]
 _FRAMER_OPTIONS = [
     SelectOptionDict(value=FRAMER_RTU, label="RTU over TCP (transparent gateway)"),
@@ -140,10 +125,9 @@ def _unit_section(name: str, model: str) -> section:
 def _common_schema(defaults: dict[str, Any]) -> dict:
     """The field both transports share: which unit ids to sweep.
 
-    The register base is deliberately *not* asked here. It has one right answer
-    on every device seen, a first-time user has no way to know theirs, and
-    `EdgeHub._check_register_base` reports it when the answer is wrong - so it
-    lives in the options flow, where someone acts on that warning.
+    The register base is not asked anywhere. It has one right answer on every
+    device seen, a user has no way to know theirs, and
+    `EdgeHub._check_register_base` reports it if one ever disagrees.
     """
     return {
         vol.Required(
@@ -152,15 +136,12 @@ def _common_schema(defaults: dict[str, Any]) -> dict:
     }
 
 
+# 9600 8N1 is not asked for: the manual specifies the baud and the parity, and
+# nothing else answered on hardware - E, O and 2 stop bits were all silent, as was
+# every other baud. `dev/edge_modbus_test.py` is where another framing gets tried.
 SERIAL_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_SERIAL_PORT): TextSelector(),
-        vol.Required(CONF_BAUDRATE, default=DEFAULT_BAUDRATE): vol.Coerce(int),
-        # 7 and 8 only: Modbus RTU frames are 8-bit, and modbus-connection's
-        # serial params type the field that way. 5 and 6 were never usable here.
-        vol.Required(CONF_BYTESIZE, default=DEFAULT_BYTESIZE): vol.In([7, 8]),
-        vol.Required(CONF_PARITY, default=DEFAULT_PARITY): vol.In(["N", "E", "O"]),
-        vol.Required(CONF_STOPBITS, default=DEFAULT_STOPBITS): vol.In([1, 2]),
         **_common_schema({}),
     }
 )
@@ -204,15 +185,10 @@ def build_scan_hub(data: dict[str, Any]) -> EdgeHub:
     return EdgeHub(
         transport=data[CONF_TRANSPORT],
         serial_port=data.get(CONF_SERIAL_PORT),
-        baudrate=data.get(CONF_BAUDRATE, DEFAULT_BAUDRATE),
-        bytesize=data.get(CONF_BYTESIZE, DEFAULT_BYTESIZE),
-        parity=data.get(CONF_PARITY, DEFAULT_PARITY),
-        stopbits=data.get(CONF_STOPBITS, DEFAULT_STOPBITS),
         host=data.get(CONF_HOST),
         port=data.get(CONF_PORT, DEFAULT_TCP_PORT),
         framer=data.get(CONF_FRAMER, FRAMER_RTU),
         timeout=SCAN_TIMEOUT,
-        register_offset=int(data.get(CONF_REGISTER_OFFSET, DEFAULT_REGISTER_OFFSET)),
     )
 
 
@@ -441,16 +417,7 @@ class EdgeConfigFlow(ConfigFlow, domain=DOMAIN):
         entry = self._get_reconfigure_entry()
         transport = entry.data[CONF_TRANSPORT]
         if user_input is not None:
-            self._data = {
-                **entry.data,
-                **user_input,
-                CONF_TRANSPORT: transport,
-                # The base is an option now, so it may have moved since setup.
-                # Re-scanning at the wrong one would find nothing.
-                CONF_REGISTER_OFFSET: option(
-                    entry, CONF_REGISTER_OFFSET, DEFAULT_REGISTER_OFFSET
-                ),
-            }
+            self._data = {**entry.data, **user_input, CONF_TRANSPORT: transport}
             # The form has just answered the same question the flag used to;
             # leaving it behind would only invite something to read it again.
             self._data.pop(_LEGACY_SCAN_ALL, None)
@@ -494,7 +461,7 @@ class EdgeConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class EdgeOptionsFlow(OptionsFlow):
-    """Polling, controls, the register base, and each thermostat's name.
+    """Polling, controls, and each thermostat's name.
 
     Adding or removing thermostats is deliberately not here: that changes the
     device set and wants a fresh scan, so it belongs to reconfiguration.
@@ -523,7 +490,6 @@ class EdgeOptionsFlow(OptionsFlow):
                     CONF_SCAN_INTERVAL: int(user_input[CONF_SCAN_INTERVAL]),
                     CONF_TIMEOUT: float(user_input[CONF_TIMEOUT]),
                     CONF_CONTROLS: user_input[CONF_CONTROLS],
-                    CONF_REGISTER_OFFSET: int(user_input[CONF_REGISTER_OFFSET]),
                     CONF_UNITS: units,
                 }
             )
@@ -555,14 +521,6 @@ class EdgeOptionsFlow(OptionsFlow):
             vol.Required(
                 CONF_CONTROLS, default=current(CONF_CONTROLS, True)
             ): BooleanSelector(),
-            vol.Required(
-                CONF_REGISTER_OFFSET,
-                default=str(current(CONF_REGISTER_OFFSET, DEFAULT_REGISTER_OFFSET)),
-            ): SelectSelector(
-                SelectSelectorConfig(
-                    options=_OFFSET_OPTIONS, mode=SelectSelectorMode.DROPDOWN
-                )
-            ),
         }
         for unit in current(CONF_UNITS, []):
             fields[vol.Required(f"unit_{unit[CONF_UNIT_ID]}")] = _unit_section(

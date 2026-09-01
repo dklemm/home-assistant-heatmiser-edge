@@ -34,14 +34,9 @@ FRAMER_RTU = "rtu"
 
 CONF_TRANSPORT = "transport"
 CONF_SERIAL_PORT = "serial_port"
-CONF_BAUDRATE = "baudrate"
-CONF_BYTESIZE = "bytesize"
-CONF_PARITY = "parity"
-CONF_STOPBITS = "stopbits"
 CONF_FRAMER = "framer"
 CONF_UNITS = "units"
 CONF_UNIT_IDS = "unit_ids"
-CONF_REGISTER_OFFSET = "register_offset"
 CONF_CONTROLS = "controls"
 CONF_TIMEOUT = "timeout"
 
@@ -50,7 +45,9 @@ CONF_MODEL = "model"
 
 # The manual states baud and parity only. Byte size and stop bits are not given
 # anywhere in it; 8N1 is the near-universal Modbus RTU framing and what every
-# working field report uses, so it is the default and it is configurable.
+# working field report uses. Fixed, not asked for: on hardware parity E and O, two
+# stop bits and every other baud were all silent, so there is nothing to choose
+# between. `dev/edge_modbus_test.py` still takes --baud and friends.
 DEFAULT_BAUDRATE = 9600
 DEFAULT_BYTESIZE = 8
 DEFAULT_PARITY = "N"
@@ -78,9 +75,11 @@ INTER_TRANSACTION_GAP = 0.05  # manual: "read and write data interval greater th
 
 # Manual register N at wire N-1: the standard Modbus convention. The manual never
 # says, so this was settled on hardware and confirmed across 1-218 (see CLAUDE.md).
-# A setting rather than a constant only so a stat that disagreed could be fixed
-# without a release; `EdgeHub._check_register_base` warns when one does.
+# It is fixed, not configurable: every device seen answers to it, a user has no way
+# to know theirs, and `EdgeHub._check_register_base` warns if one ever disagrees.
 DEFAULT_REGISTER_OFFSET = -1
+# Both candidates, for `dev/edge_modbus_test.py detect` - the only thing that still
+# reads at a base other than the one above.
 REGISTER_OFFSETS = (-1, 0)
 
 # When to ask the thermostat again after a write, until it has actually acted.

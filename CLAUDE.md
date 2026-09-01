@@ -48,20 +48,34 @@ showing the floor probe and the mode select showing a setpoint, and nothing rais
 
 It hangs off `async_read_block`, not the poll, so it covers **every** read whose block reaches
 register 31 — the poll, the config-flow scan and its discovery probe. Onboarding is when a wrong base
-is most worth hearing about, and it is the one moment the user can still act on it. Blocks that never
-reach 31 (a schedule read is 51–218) are skipped explicitly: without that guard `words.get(31)` is
-`None`, `None != unit_id`, and every schedule read reports a mis-addressed bus.
+is most worth hearing about. Blocks that never reach 31 (a schedule read is 51–218) are skipped
+explicitly: without that guard `words.get(31)` is `None`, `None != unit_id`, and every schedule read
+reports a mis-addressed bus.
 
-The base stays a config option (−1 or 0, defaulting to −1), so a stat that ever disagreed is fixed
-without a release — but **setup never asks for it**. A first-time user has no way to answer, and the
-check reports it when it is wrong, so it lives only in the *options* flow, which is where someone
-acts on that warning. It is therefore in `entry.options` and not `entry.data`, which is why
-`async_step_reconfigure` seeds it with `option()` before a re-scan; gated by
-`tests/test_config_flow.py::test_a_rescan_honours_an_offset_set_in_options`.
+**The base is not configurable — removed 2026-09-01.** It was an option (−1 or 0), in the options
+flow only, so a stat that ever disagreed could be fixed without a release. Nothing ever disagreed,
+and it cost a form field, two strings, an offset argument threaded through both hub builders, and a
+reconfigure step that had to re-seed it from `entry.options` before a re-scan — all to answer a
+question with one answer. `DEFAULT_REGISTER_OFFSET` is simply what `EdgeHub` uses now. Entries set
+up before this still carry `register_offset` in `entry.options`; it is ignored, and the next options
+save drops it. Gated by
+`tests/test_config_flow.py::test_a_rescan_ignores_a_register_offset_left_in_options`.
 
-`dev/edge_modbus_test.py detect` prints register 31 at both bases when that happens — **any unit
-with id ≥ 6 is decisive**, because nothing else in the 30–34 window can hold a
-value above 5, while on unit 1 both bases can read 1.
+So the warning no longer points at a dial. `EdgeHub.register_offset` survives as a constructor
+argument for exactly one caller — `dev/edge_modbus_test.py detect`, which prints register 31 at both
+bases. **Any unit with id ≥ 6 is decisive**, because nothing else in the 30–34 window can hold a
+value above 5, while on unit 1 both bases can read 1. That is the remedy path: read it off with the
+CLI and report it, because a stat that really needs the other base is a finding, not a setting.
+
+**The serial framing went the same way, the same day.** 9600 8N1 was four fields on the serial step
+— baud, data bits, parity, stop bits — each with a default nobody has ever had reason to change: the
+manual specifies the baud and the parity, and on hardware every alternative is *silent*, so a wrong
+answer here does not degrade anything, it simply finds no thermostats. The step now asks for the
+port and the id list, `DEFAULT_BAUDRATE` and friends are what `EdgeHub` uses, and older entries'
+stored `baudrate`/`bytesize`/`parity`/`stopbits` are ignored. The hub keeps the four constructor
+arguments for `dev/edge_modbus_test.py`, which is where another framing gets tried — and where
+anyone claiming a stat needs one should prove it. Gated by
+`tests/test_config_flow.py::test_serial_flow_creates_an_entry`, which pins the whole stored entry.
 
 **Heat or Timer?** There is no model or product-id register — only "Code version number" at
 register 1, which does not distinguish them. `detect.guess_model` scores the two: a Heat stores a

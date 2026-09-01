@@ -20,8 +20,9 @@ thermostat's own keypad, under **feature 11**. **The factory default of 00 disab
 thermostat entirely** — that is the single most common reason nothing is found. Valid IDs are 1–32,
 and each must be unique on the bus.
 
-The manual specifies 9600 baud, no parity. It says nothing about data or stop bits; 8N1 is assumed
-and is configurable.
+The bus runs at 9600 baud, 8 data bits, no parity, 1 stop bit. The manual specifies the baud and the
+parity and is silent on the rest, but nothing else has ever answered on real hardware, so setup does
+not ask: the serial step wants the port and nothing more.
 
 ## Installation
 
@@ -41,10 +42,11 @@ register**, so whether each thermostat is a Heat or a Timer is worked out from w
 look like — accurate in practice, but it is offered as a default you can change, and any uncertain
 guess is flagged.
 
-**Register addressing** is worked out automatically too. The manual numbers registers from 1 but
-never says whether the wire agrees, so setup checks which addressing makes a thermostat report its
-own ID back. Leave it on *Detect automatically* unless every reading looks like it belongs to the
-neighbouring register.
+**Register addressing** is not asked about at all. The manual numbers registers from 1 but never
+says whether the wire agrees; it does not — register N lives at address N−1, the standard Modbus
+convention, confirmed across the whole register map on hardware. Register 31 holds the ID the
+thermostat was addressed by, so every read checks it, and a thermostat that ever disagreed would say
+so in the log.
 
 ## Two behaviours worth knowing
 
@@ -89,8 +91,7 @@ actions:
 
 ## Options
 
-Polling interval (60 s by default), response timeout, register addressing, and each thermostat's
-name and model. There is also **Allow changing settings** — turn it off and every control
+Polling interval (60 s by default), response timeout, and each thermostat's name and model. There is also **Allow changing settings** — turn it off and every control
 disappears, leaving a read-only integration. Readings are unaffected.
 
 To add or remove a thermostat, use **Reconfigure** on the integration; it re-scans the bus and keeps

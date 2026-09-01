@@ -18,20 +18,10 @@ from homeassistant.helpers.typing import ConfigType
 from homeassistant.loader import async_get_integration
 
 from .const import (
-    CONF_BAUDRATE,
-    CONF_BYTESIZE,
     CONF_FRAMER,
-    CONF_PARITY,
-    CONF_REGISTER_OFFSET,
-    DEFAULT_REGISTER_OFFSET,
     CONF_SERIAL_PORT,
-    CONF_STOPBITS,
     CONF_TIMEOUT,
     CONF_TRANSPORT,
-    DEFAULT_BAUDRATE,
-    DEFAULT_BYTESIZE,
-    DEFAULT_PARITY,
-    DEFAULT_STOPBITS,
     DEFAULT_TCP_PORT,
     DEFAULT_TIMEOUT,
     DOMAIN,
@@ -68,17 +58,10 @@ def build_hub(entry: ConfigEntry) -> EdgeHub:
     return EdgeHub(
         transport=entry.data[CONF_TRANSPORT],
         serial_port=entry.data.get(CONF_SERIAL_PORT),
-        baudrate=entry.data.get(CONF_BAUDRATE, DEFAULT_BAUDRATE),
-        bytesize=entry.data.get(CONF_BYTESIZE, DEFAULT_BYTESIZE),
-        parity=entry.data.get(CONF_PARITY, DEFAULT_PARITY),
-        stopbits=entry.data.get(CONF_STOPBITS, DEFAULT_STOPBITS),
         host=entry.data.get(CONF_HOST),
         port=entry.data.get(CONF_PORT, DEFAULT_TCP_PORT),
         framer=entry.data.get(CONF_FRAMER, FRAMER_RTU),
         timeout=option(entry, CONF_TIMEOUT, DEFAULT_TIMEOUT),
-        # None means "probe for it". The config flow normally stores an answer,
-        # so a restart does not re-probe the bus.
-        register_offset=option(entry, CONF_REGISTER_OFFSET, DEFAULT_REGISTER_OFFSET),
     )
 
 
