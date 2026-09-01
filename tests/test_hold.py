@@ -42,8 +42,8 @@ from tests.test_coordinator import setup_entry
 
 
 def device_id(hass, entry, suffix: str) -> str:
-    device = dr.async_get(hass).async_get_device(
-        identifiers={(DOMAIN, f"{entry.entry_id}_{suffix}")}
+    device = dr.async_get(hass).async_get_device_by_identifier(
+        (DOMAIN, f"{entry.entry_id}_{suffix}"), entry.entry_id
     )
     assert device is not None
     return device.id

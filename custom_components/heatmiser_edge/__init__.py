@@ -206,8 +206,10 @@ def _drop_stale_entities(
     # is visible in the UI and not just in the entity set.
     device_registry = dr.async_get(hass)
     for unit in coordinator.units:
-        device = device_registry.async_get_device(
-            identifiers={(DOMAIN, f"{entry.entry_id}_{unit.unit_id}")}
+        # By identifier *and* entry: identifiers are no longer unique across
+        # config entries, and `async_get_device` is deprecated for saying so.
+        device = device_registry.async_get_device_by_identifier(
+            (DOMAIN, f"{entry.entry_id}_{unit.unit_id}"), entry.entry_id
         )
         if device is not None and device.model != MODEL_LABELS[unit.model]:
             device_registry.async_update_device(

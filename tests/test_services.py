@@ -37,8 +37,8 @@ WORDS = [2026, (8 << 8) | 12, (14 << 8) | 30, 45]
 
 def device_id(hass, entry, suffix: str) -> str:
     """The registry id of one thermostat ("1") or of the bus ("bus")."""
-    device = dr.async_get(hass).async_get_device(
-        identifiers={(DOMAIN, f"{entry.entry_id}_{suffix}")}
+    device = dr.async_get(hass).async_get_device_by_identifier(
+        (DOMAIN, f"{entry.entry_id}_{suffix}"), entry.entry_id
     )
     assert device is not None
     return device.id

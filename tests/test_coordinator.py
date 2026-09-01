@@ -174,16 +174,20 @@ async def test_the_device_tree_hangs_off_the_bus(hass, mock_hub):
 
     entry = await setup_entry(hass)
     registry = dr.async_get(hass)
-    bus = registry.async_get_device(identifiers={(DOMAIN, f"{entry.entry_id}_bus")})
+
+    def device(suffix) -> dr.DeviceEntry | None:
+        return registry.async_get_device_by_identifier(
+            (DOMAIN, f"{entry.entry_id}_{suffix}"), entry.entry_id
+        )
+
+    bus = device("bus")
     assert bus is not None
     for unit_id in (1, 2, 3):
-        device = registry.async_get_device(
-            identifiers={(DOMAIN, f"{entry.entry_id}_{unit_id}")}
-        )
-        assert device is not None
-        assert device.via_device_id == bus.id
+        thermostat = device(unit_id)
+        assert thermostat is not None
+        assert thermostat.via_device_id == bus.id
     # The firmware version register becomes the device's software version.
-    hall = registry.async_get_device(identifiers={(DOMAIN, f"{entry.entry_id}_1")})
+    hall = device(1)
     assert hall.sw_version == "42"
 
 
